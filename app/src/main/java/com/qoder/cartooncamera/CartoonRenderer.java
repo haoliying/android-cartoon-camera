@@ -733,7 +733,7 @@ public class CartoonRenderer {
 
     private final float[] tint = new float[3];
 
-    private static void hueColor(float h, float s, float v, float[] out) {
+    static void hueColor(float h, float s, float v, float[] out) {
         h = h - (float) Math.floor(h);
         float i = (float) Math.floor(h * 6f);
         float f = h * 6f - i;
@@ -970,10 +970,12 @@ public class CartoonRenderer {
             "attribute vec2 aPos;",
             "uniform mediump vec2 uCrop;",
             "uniform mediump float uMirror;",
+            "uniform mediump float uFlipV;",
             "varying vec2 vUv;",
             "void main() {",
             "  vec2 o = (aPos - 0.5) * uCrop + 0.5;",
             "  if (uMirror > 0.5) { o.x = 1.0 - o.x; }",
+            "  if (uFlipV > 0.5) { o.y = 1.0 - o.y; }",
             "  vUv = o;",
             "  gl_Position = vec4(aPos * 2.0 - 1.0, 0.0, 1.0);",
             "}"

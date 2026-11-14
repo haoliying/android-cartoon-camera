@@ -104,6 +104,26 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private SeekBar intensityBar;
     private final List<TextView> chips = new ArrayList<>();
 
+    // 拍摄模式：录像 / 拍照（普通·专业·傻瓜）
+    private static final int MODE_VIDEO = 0;
+    private static final int MODE_PHOTO = 1;
+    private static final int SUB_NORMAL = 0;
+    private static final int SUB_PRO = 1;
+    private static final int SUB_IDIOT = 2;
+
+    private int captureMode = MODE_VIDEO;
+    private int photoSub = SUB_NORMAL;
+    private ScenePreset scene = ScenePreset.ALL[0];
+    private CaptureParams proParams = new CaptureParams();
+    private boolean capturing;
+
+    private TextView videoPill, photoPill;
+    private TextView subNormalPill, subProPill, subIdiotPill;
+    private LinearLayout modeRow;
+    private LinearLayout extraRow;
+    private TextView extraSummary;
+    private TextView extraActionBtn;
+
     // 相册卡通化
     private TextView galleryBtn;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -144,6 +164,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         intensity = prefs.getFloat("intensity", 0.95f);
         style = StylePreset.byId(prefs.getString("style", "cartoon"));
         spritesOn = prefs.getBoolean("sprites", true);
+        captureMode = prefs.getInt("captureMode", MODE_VIDEO);
+        photoSub = prefs.getInt("photoSub", SUB_NORMAL);
+        loadProParams();
+        String sceneName = prefs.getString("scene", null);
+        if (sceneName != null) {
+            for (ScenePreset sp : ScenePreset.ALL) {
+                if (sp.name.equals(sceneName)) {
+                    scene = sp;
+                    break;
+                }
+            }
+        }
 
         renderer = new CartoonRenderer();
         renderer.setErrorListener(msg -> ui.post(() -> toast(msg)));
@@ -152,6 +184,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         cameraController = new CameraController(this);
 
         buildUi();
+        updateModeUi();
+        applyCameraParams();
 
         if (hasPerm(Manifest.permission.RECORD_AUDIO)) micAllowed = true;
         ensurePermissions();
@@ -177,6 +211,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     protected void onDestroy() {
         super.onDestroy();
         if (processingCancel != null) processingCancel.set(true);
+        capturing = false;
         worker.shutdownNow();
         dismissProgress();
         ui.removeCallbacksAndMessages(null);
@@ -320,6 +355,36 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         bottomPanel.setBackground(panelBg);
         bottomPanel.setPadding(0, dp(26), 0, dp(10));
 
+        // 拍摄模式：录像 / 拍照（普通·专业·傻瓜）
+        HorizontalScrollView modeScroll = new HorizontalScrollView(this);
+        modeScroll.setHorizontalScrollBarEnabled(false);
+        modeRow = new LinearLayout(this);
+        modeRow.setOrientation(LinearLayout.HORIZONTAL);
+        modeRow.setPadding(dp(16), 0, dp(8), dp(2));
+        modeScroll.addView(modeRow, new HorizontalScrollView.LayoutParams(WRAP, WRAP));
+
+        videoPill = pill("录像", true);
+        videoPill.setOnClickListener(v -> setCaptureMode(MODE_VIDEO));
+        addPill(modeRow, videoPill);
+
+        photoPill = pill("拍照", false);
+        photoPill.setOnClickListener(v -> setCaptureMode(MODE_PHOTO));
+        addPill(modeRow, photoPill);
+
+        subNormalPill = pill("普通", true);
+        subNormalPill.setOnClickListener(v -> setPhotoSub(SUB_NORMAL));
+        addPill(modeRow, subNormalPill);
+
+        subProPill = pill("专业", false);
+        subProPill.setOnClickListener(v -> setPhotoSub(SUB_PRO));
+        addPill(modeRow, subProPill);
+
+        subIdiotPill = pill("傻瓜", false);
+        subIdiotPill.setOnClickListener(v -> setPhotoSub(SUB_IDIOT));
+        addPill(modeRow, subIdiotPill);
+
+        bottomPanel.addView(modeScroll, new LinearLayout.LayoutParams(MATCH, WRAP));
+
         HorizontalScrollView styleScroll = new HorizontalScrollView(this);
         styleScroll.setHorizontalScrollBarEnabled(false);
         LinearLayout styleRow = new LinearLayout(this);
@@ -392,6 +457,30 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         });
         bottomPanel.addView(sliderRow, new LinearLayout.LayoutParams(MATCH, WRAP));
 
+        // 专业参数摘要 / 傻瓜场景摘要
+        extraRow = new LinearLayout(this);
+        extraRow.setOrientation(LinearLayout.HORIZONTAL);
+        extraRow.setGravity(Gravity.CENTER_VERTICAL);
+        extraRow.setPadding(dp(20), 0, dp(20), dp(2));
+        extraRow.setVisibility(View.GONE);
+
+        extraSummary = new TextView(this);
+        extraSummary.setTextColor(0xFFB9BDCC);
+        extraSummary.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        extraSummary.setSingleLine(true);
+        extraSummary.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        extraRow.addView(extraSummary, new LinearLayout.LayoutParams(0, WRAP, 1f));
+
+        extraActionBtn = pill("调整", false);
+        extraActionBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        extraActionBtn.setPadding(dp(14), dp(5), dp(14), dp(6));
+        extraActionBtn.setOnClickListener(v -> onExtraAction());
+        LinearLayout.LayoutParams extraBtnLp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        extraBtnLp.leftMargin = dp(10);
+        extraRow.addView(extraActionBtn, extraBtnLp);
+
+        bottomPanel.addView(extraRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+
         LinearLayout recordRow = new LinearLayout(this);
         recordRow.setOrientation(LinearLayout.HORIZONTAL);
         recordRow.setGravity(Gravity.CENTER);
@@ -403,7 +492,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         ring.setColor(Color.TRANSPARENT);
         ring.setStroke(dp(4), 0xF2FFFFFF);
         recordBtn.setBackground(ring);
-        recordBtn.setOnClickListener(v -> toggleRecording());
+        recordBtn.setOnClickListener(v -> onShutter());
         recordBtn.setContentDescription("开始录制");
 
         recordInner = new View(this);
@@ -490,7 +579,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (spriteBtn != null) {
             spriteBtn.animate().alpha(spritesOn ? 1f : 0.38f).setDuration(150).start();
         }
-        toast(spritesOn ? "小精灵：开" : "小精灵：关");
+        toast(spritesOn ? "小精灵：开（相机/拍照/相册都会出现）" : "小精灵：关");
     }
 
     private final SensorEventListener motionListener = new SensorEventListener() {
@@ -539,6 +628,430 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         prefs.edit().putString("style", preset.id).apply();
     }
 
+    // ------------------------------------------------------------------ 快门 / 拍照
+
+    private void onShutter() {
+        if (captureMode == MODE_PHOTO) {
+            takePhoto();
+        } else {
+            toggleRecording();
+        }
+    }
+
+    private void takePhoto() {
+        if (capturing) return;
+        if (processing) {
+            toast("正在处理上一张，请稍候");
+            return;
+        }
+        if (!surfaceReady || !cameraOpened) {
+            toast("相机还没准备好");
+            return;
+        }
+        capturing = true;
+        updateShutterBusy();
+        recordInner.animate().scaleX(0.8f).scaleY(0.8f).setDuration(90)
+                .withEndAction(() -> recordInner.animate().scaleX(1f).scaleY(1f)
+                        .setDuration(120).start()).start();
+        cameraController.captureStill(bytes -> ui.post(() -> startPhotoProcess(bytes)),
+                msg -> ui.post(() -> {
+                    capturing = false;
+                    updateShutterBusy();
+                    toast(msg);
+                }));
+    }
+
+    private void updateShutterBusy() {
+        recordBtn.setEnabled(!capturing);
+        recordBtn.setAlpha(capturing ? 0.5f : 1f);
+    }
+
+    private void startPhotoProcess(byte[] jpeg) {
+        final StylePreset st = style;
+        final float in = intensity;
+        final boolean spr = spritesOn;
+        final AtomicBoolean cancel = new AtomicBoolean(false);
+        processingCancel = cancel;
+
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("照片卡通化")
+                .setMessage("处理中…")
+                .setNegativeButton("取消", (d, w) -> cancel.set(true))
+                .setCancelable(false)
+                .create();
+        progressDialog = dialog;
+        dialog.show();
+
+        worker.execute(() -> GalleryProcessor.processJpegBytes(this, jpeg, st, in, spr, cancel,
+                new GalleryProcessor.Listener() {
+                    @Override
+                    public void onProgress(float p, String label) {
+                        ui.post(() -> {
+                            if (progressDialog != null && progressDialog.isShowing()) {
+                                progressDialog.setMessage(label);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onDone(String message, Bitmap preview) {
+                        ui.post(() -> {
+                            dismissProgress();
+                            processingCancel = null;
+                            capturing = false;
+                            updateShutterBusy();
+                            if (isFinishing() || isDestroyed()) return;
+                            if (preview != null) showPreview(message, preview);
+                            else toast(message);
+                        });
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        ui.post(() -> {
+                            dismissProgress();
+                            processingCancel = null;
+                            capturing = false;
+                            updateShutterBusy();
+                            if (!isFinishing() && !isDestroyed()) toast(message);
+                        });
+                    }
+                }));
+    }
+
+    // ------------------------------------------------------------------ 拍摄模式
+
+    private TextView pill(String text, boolean active) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(16), dp(7), dp(16), dp(8));
+        t.setBackground(chipBg(active));
+        t.setTextColor(active ? 0xFFFFFFFF : 0xFFE9EAF2);
+        if (active) t.setTypeface(Typeface.DEFAULT_BOLD);
+        return t;
+    }
+
+    private void addPill(LinearLayout row, TextView pill) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        lp.rightMargin = dp(8);
+        row.addView(pill, lp);
+    }
+
+    private void stylePill(TextView t, boolean active) {
+        if (t == null) return;
+        t.setBackground(chipBg(active));
+        t.setTextColor(active ? 0xFFFFFFFF : 0xFFE9EAF2);
+        t.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+    }
+
+    private void setCaptureMode(int mode) {
+        if (capturing || mode == captureMode) return;
+        if (recording || recorderStarted) {
+            stopRecording();
+            toast("先结束录像再切换模式");
+            return;
+        }
+        captureMode = mode;
+        prefs.edit().putInt("captureMode", captureMode).apply();
+        updateModeUi();
+        applyCameraParams();
+    }
+
+    private void setPhotoSub(int sub) {
+        if (capturing || sub == photoSub) return;
+        photoSub = sub;
+        prefs.edit().putInt("photoSub", photoSub).apply();
+        updateModeUi();
+        applyCameraParams();
+    }
+
+    private void updateModeUi() {
+        boolean photo = captureMode == MODE_PHOTO;
+        stylePill(videoPill, !photo);
+        stylePill(photoPill, photo);
+        int subVis = photo ? View.VISIBLE : View.GONE;
+        subNormalPill.setVisibility(subVis);
+        subProPill.setVisibility(subVis);
+        subIdiotPill.setVisibility(subVis);
+        stylePill(subNormalPill, photoSub == SUB_NORMAL);
+        stylePill(subProPill, photoSub == SUB_PRO);
+        stylePill(subIdiotPill, photoSub == SUB_IDIOT);
+
+        GradientDrawable d = (GradientDrawable) recordInner.getBackground();
+        if (d != null) {
+            d.setColor(photo ? 0xFFF4F5FA : 0xFFFF3B5C);
+            d.setCornerRadius(dp(photo ? 30 : (recording ? 10 : 30)));
+        }
+        recordBtn.setContentDescription(photo ? "拍照" : "开始录制");
+        updateExtraUi();
+    }
+
+    private void updateExtraUi() {
+        if (extraRow == null) return;
+        if (captureMode != MODE_PHOTO || photoSub == SUB_NORMAL) {
+            extraRow.setVisibility(View.GONE);
+            return;
+        }
+        extraRow.setVisibility(View.VISIBLE);
+        if (photoSub == SUB_PRO) {
+            extraActionBtn.setText("调整");
+            extraSummary.setText(proParams.summary());
+        } else {
+            extraActionBtn.setText("换场景");
+            extraSummary.setText("场景 · " + scene.name + "：" + scene.hint);
+        }
+    }
+
+    private void onExtraAction() {
+        if (photoSub == SUB_PRO) showProDialog();
+        else showSceneDialog();
+    }
+
+    private void applyCameraParams() {
+        CaptureParams p;
+        if (captureMode != MODE_PHOTO || photoSub == SUB_NORMAL) {
+            p = new CaptureParams();
+        } else if (photoSub == SUB_PRO) {
+            p = proParams;
+        } else {
+            p = scene.toParams();
+        }
+        if (cameraController != null) cameraController.setParams(p);
+    }
+
+    // ------------------------------------------------------------------ 专业参数
+
+    private void showProDialog() {
+        final CaptureParams p = proParams.copy();
+        final int[] isoIdx = {isoIndexOf(p.manualExposure ? p.iso : 0)};
+        final int[] shutterIdx = {shutterIndexOf(p.manualExposure ? p.exposureNs : 0)};
+        final int[] evIdx = {Math.round((p.ev + 2f) / 0.1f)};
+        final int[] wbIdx = {p.wbAuto ? 0 : Math.max(1, Math.min(57, (p.kelvin - 2300) / 100 + 1))};
+        final int[] focusIdx = {p.focusMode == CaptureParams.FOCUS_AUTO ? 0
+                : p.focusMode == CaptureParams.FOCUS_INFINITY ? 1
+                : p.focusMode == CaptureParams.FOCUS_MACRO ? 2 : 3};
+        final int[] manualIdx = {Math.round(Math.max(0f, Math.min(10f, p.diopter)) * 10f)};
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(8), dp(20), dp(4));
+
+        addSeek(box, "ISO", ISO_LABELS, isoIdx[0], v -> isoIdx[0] = v);
+        addSeek(box, "快门", SHUTTER_LABELS, shutterIdx[0], v -> shutterIdx[0] = v);
+        addSeek(box, "曝光补偿", EV_LABELS, evIdx[0], v -> evIdx[0] = v);
+        addSeek(box, "白平衡", WB_LABELS, wbIdx[0], v -> wbIdx[0] = v);
+        addSeek(box, "对焦", FOCUS_LABELS, focusIdx[0], v -> focusIdx[0] = v);
+        addSeek(box, "手动焦距", FOCUS_DIST_LABELS, manualIdx[0], v -> manualIdx[0] = v);
+
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(box);
+
+        new AlertDialog.Builder(this)
+                .setTitle("专业参数")
+                .setView(scroll)
+                .setPositiveButton("应用", (d, w) -> {
+                    CaptureParams q = new CaptureParams();
+                    q.manualExposure = isoIdx[0] > 0 || shutterIdx[0] > 0;
+                    if (q.manualExposure) {
+                        q.iso = isoIdx[0] > 0 ? ISO_VALUES[isoIdx[0]] : 200;
+                        q.exposureNs = shutterIdx[0] > 0 ? SHUTTER_VALUES[shutterIdx[0]]
+                                : 1_000_000_000L / 60;
+                    } else {
+                        q.ev = -2f + evIdx[0] * 0.1f;
+                    }
+                    q.wbAuto = wbIdx[0] == 0;
+                    q.kelvin = q.wbAuto ? 5200 : 2300 + (wbIdx[0] - 1) * 100;
+                    q.focusMode = focusIdx[0] == 0 ? CaptureParams.FOCUS_AUTO
+                            : focusIdx[0] == 1 ? CaptureParams.FOCUS_INFINITY
+                            : focusIdx[0] == 2 ? CaptureParams.FOCUS_MACRO
+                            : CaptureParams.FOCUS_MANUAL;
+                    q.diopter = manualIdx[0] / 10f;
+                    proParams = q;
+                    saveProParams();
+                    applyCameraParams();
+                    updateExtraUi();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private interface IntSink {
+        void set(int value);
+    }
+
+    private void addSeek(LinearLayout parent, String label, String[] labels, int index,
+                         IntSink sink) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(0, dp(6), 0, dp(2));
+
+        TextView title = new TextView(this);
+        title.setText(label + "：" + labels[Math.max(0, Math.min(labels.length - 1, index))]);
+        title.setTextColor(0xFFE9EAF2);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        row.addView(title);
+
+        SeekBar bar = new SeekBar(this);
+        bar.setMax(labels.length - 1);
+        bar.setProgress(Math.max(0, Math.min(labels.length - 1, index)));
+        bar.setProgressTintList(android.content.res.ColorStateList.valueOf(0xFFFF5C7A));
+        bar.setThumbTintList(android.content.res.ColorStateList.valueOf(0xFFFF5C7A));
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                title.setText(label + "：" + labels[progress]);
+                sink.set(progress);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+            }
+        });
+        row.addView(bar, new LinearLayout.LayoutParams(MATCH, WRAP));
+        parent.addView(row, new LinearLayout.LayoutParams(MATCH, WRAP));
+    }
+
+    private static final int[] ISO_VALUES = {0, 100, 200, 400, 800, 1600, 3200, 6400};
+    private static final String[] ISO_LABELS = {"自动", "100", "200", "400", "800", "1600",
+            "3200", "6400"};
+    private static final long[] SHUTTER_VALUES = {0,
+            1_000_000_000L / 1000, 1_000_000_000L / 500, 1_000_000_000L / 250,
+            1_000_000_000L / 125, 1_000_000_000L / 60, 1_000_000_000L / 30,
+            1_000_000_000L / 15, 1_000_000_000L / 8, 1_000_000_000L / 4,
+            500_000_000L, 1_000_000_000L, 2_000_000_000L};
+    private static final String[] SHUTTER_LABELS = {"自动", "1/1000s", "1/500s", "1/250s",
+            "1/125s", "1/60s", "1/30s", "1/15s", "1/8s", "1/4s", "1/2s", "1s", "2s"};
+    private static final String[] EV_LABELS = buildEvLabels();
+    private static final String[] FOCUS_LABELS = {"自动", "无穷远", "微距", "手动"};
+    private static final String[] WB_LABELS = buildWbLabels();
+    private static final String[] FOCUS_DIST_LABELS = buildFocusLabels();
+
+    private static String[] buildEvLabels() {
+        String[] a = new String[41];
+        for (int i = 0; i < a.length; i++) {
+            float v = -2f + i * 0.1f;
+            a[i] = String.format(Locale.US, "%+.1f", v);
+        }
+        return a;
+    }
+
+    private static String[] buildWbLabels() {
+        String[] a = new String[58];
+        a[0] = "自动";
+        for (int i = 1; i < a.length; i++) a[i] = (2300 + (i - 1) * 100) + "K";
+        return a;
+    }
+
+    private static String[] buildFocusLabels() {
+        String[] a = new String[101];
+        for (int i = 0; i < a.length; i++) {
+            float d = i / 10f;
+            if (d < 0.05f) a[i] = "∞";
+            else a[i] = String.format(Locale.US, "%.0fcm", 100f / d);
+        }
+        return a;
+    }
+
+    private static int isoIndexOf(int iso) {
+        if (iso <= 0) return 0;
+        int best = 1;
+        for (int i = 1; i < ISO_VALUES.length; i++) {
+            if (Math.abs(ISO_VALUES[i] - iso) < Math.abs(ISO_VALUES[best] - iso)) best = i;
+        }
+        return best;
+    }
+
+    private static int shutterIndexOf(long ns) {
+        if (ns <= 0) return 0;
+        int best = 1;
+        for (int i = 1; i < SHUTTER_VALUES.length; i++) {
+            if (Math.abs(SHUTTER_VALUES[i] - ns) < Math.abs(SHUTTER_VALUES[best] - ns)) best = i;
+        }
+        return best;
+    }
+
+    private void saveProParams() {
+        prefs.edit()
+                .putBoolean("pro_manual", proParams.manualExposure)
+                .putInt("pro_iso", proParams.iso)
+                .putLong("pro_shutter", proParams.exposureNs)
+                .putFloat("pro_ev", proParams.ev)
+                .putBoolean("pro_wb_auto", proParams.wbAuto)
+                .putInt("pro_kelvin", proParams.kelvin)
+                .putInt("pro_focus", proParams.focusMode)
+                .putFloat("pro_diopter", proParams.diopter)
+                .apply();
+    }
+
+    private void loadProParams() {
+        boolean first = !prefs.contains("pro_manual");
+        proParams.manualExposure = prefs.getBoolean("pro_manual", true);
+        proParams.iso = prefs.getInt("pro_iso", 200);
+        proParams.exposureNs = prefs.getLong("pro_shutter", 1_000_000_000L / 125);
+        proParams.ev = prefs.getFloat("pro_ev", 0f);
+        proParams.wbAuto = prefs.getBoolean("pro_wb_auto", true);
+        proParams.kelvin = prefs.getInt("pro_kelvin", 5200);
+        proParams.focusMode = prefs.getInt("pro_focus", CaptureParams.FOCUS_AUTO);
+        proParams.diopter = prefs.getFloat("pro_diopter", 0f);
+        if (first) {
+            proParams.manualExposure = true;
+            proParams.iso = 200;
+            proParams.exposureNs = 1_000_000_000L / 125;
+            proParams.wbAuto = false;
+            proParams.kelvin = 5200;
+            proParams.focusMode = CaptureParams.FOCUS_AUTO;
+        }
+    }
+
+    // ------------------------------------------------------------------ 傻瓜场景
+
+    private void showSceneDialog() {
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(12), dp(8), dp(12), dp(8));
+
+        LinearLayout row = null;
+        for (int i = 0; i < ScenePreset.ALL.length; i++) {
+            if (i % 3 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                list.addView(row, new LinearLayout.LayoutParams(MATCH, WRAP));
+            }
+            final ScenePreset sp = ScenePreset.ALL[i];
+            TextView b = pill(sp.name, sp == scene);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            b.setPadding(dp(4), dp(9), dp(4), dp(9));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, WRAP, 1f);
+            lp.setMargins(dp(4), dp(4), dp(4), dp(4));
+            b.setOnClickListener(v -> {
+                scene = sp;
+                prefs.edit().putString("scene", sp.name).apply();
+                applyCameraParams();
+                updateExtraUi();
+                toast(sp.name + " · " + sp.hint);
+                if (sceneDialog != null) sceneDialog.dismiss();
+            });
+            row.addView(b, lp);
+        }
+
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(list);
+        sceneDialog = new AlertDialog.Builder(this)
+                .setTitle("选择场景 · 自动匹配参数")
+                .setView(scroll)
+                .setNegativeButton("关闭", null)
+                .create();
+        sceneDialog.show();
+    }
+
+    private AlertDialog sceneDialog;
+
     // ------------------------------------------------------------------ 相册处理
 
     private void pickFromGallery() {
@@ -579,7 +1092,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void beginGallery(Uri uri) {
-        if (processing) {
+        if (processing || capturing) {
             toast("正在处理，请稍候");
             return;
         }
@@ -599,7 +1112,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         progressDialog = dialog;
         dialog.show();
 
-        worker.execute(() -> GalleryProcessor.process(this, uri, null, st, in, cancel,
+        final boolean spr = spritesOn;
+        worker.execute(() -> GalleryProcessor.process(this, uri, null, st, in, spr, cancel,
                 new GalleryProcessor.Listener() {
                     @Override
                     public void onProgress(float p, String label) {
@@ -815,6 +1329,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             toast("录制中无法切换摄像头");
             return;
         }
+        if (capturing) return;
         facing = (facing == CameraCharacteristics.LENS_FACING_BACK)
                 ? CameraCharacteristics.LENS_FACING_FRONT
                 : CameraCharacteristics.LENS_FACING_BACK;

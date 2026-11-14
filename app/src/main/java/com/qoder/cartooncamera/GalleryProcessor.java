@@ -32,6 +32,7 @@ import android.provider.MediaStore;
 import android.util.Log;
 import android.view.Surface;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -77,7 +78,8 @@ public class GalleryProcessor {
 
     /** 同步处理（调用方放在后台线程）。mime 可为空。 */
     public static void process(Context ctx, Uri uri, String mime, StylePreset style,
-                               float intensity, AtomicBoolean cancel, Listener l) {
+                               float intensity, boolean sprites, AtomicBoolean cancel,
+                               Listener l) {
         try {
             if (mime == null) {
                 try {
@@ -97,9 +99,9 @@ public class GalleryProcessor {
                 }
             }
             if (mime != null && mime.startsWith("video/")) {
-                doVideo(ctx, uri, style, intensity, cancel, l);
+                doVideo(ctx, uri, style, intensity, sprites, cancel, l);
             } else {
-                doImage(ctx, uri, style, intensity, cancel, l);
+                doImage(ctx, uri, style, intensity, sprites, cancel, l);
             }
         } catch (Cancelled c) {
             l.onError("已取消");
@@ -110,21 +112,77 @@ public class GalleryProcessor {
         }
     }
 
+    /** 相机刚拍的 JPEG（原始传感器图像），同样走这条离线管线。 */
+    public static void processJpegBytes(Context ctx, byte[] jpeg, StylePreset style,
+                                        float intensity, boolean sprites, AtomicBoolean cancel,
+                                        Listener l) {
+        try {
+            l.onProgress(0.05f, "读取照片…");
+            Bitmap src = decodeJpeg(jpeg);
+            if (cancel.get()) throw new Cancelled();
+            l.onProgress(0.3f, "卡通化…");
+            Bitmap out = renderImage(src, style, intensity, sprites);
+            src.recycle();
+            if (cancel.get()) throw new Cancelled();
+            l.onProgress(0.85f, "保存到相册…");
+            String where = saveBitmap(ctx, out);
+            l.onProgress(1f, "完成");
+            l.onDone(where, out);
+        } catch (Cancelled c) {
+            l.onError("已取消");
+        } catch (Throwable t) {
+            Log.e(TAG, "photo failed", t);
+            String m = t.getMessage();
+            l.onError(m == null || m.isEmpty() ? "处理照片失败" : m);
+        }
+    }
+
     // ------------------------------------------------------------------ 图片
 
     private static void doImage(Context ctx, Uri uri, StylePreset style, float intensity,
-                                AtomicBoolean cancel, Listener l) {
+                                boolean sprites, AtomicBoolean cancel, Listener l) {
         l.onProgress(0.05f, "读取图片…");
         Bitmap src = decodeImage(ctx.getContentResolver(), uri);
         if (cancel.get()) throw new Cancelled();
         l.onProgress(0.25f, "卡通化…");
-        Bitmap out = renderImage(src, style, intensity);
+        Bitmap out = renderImage(src, style, intensity, sprites);
         src.recycle();
         if (cancel.get()) throw new Cancelled();
         l.onProgress(0.85f, "保存到相册…");
         String where = saveBitmap(ctx, out);
         l.onProgress(1f, "完成");
         l.onDone(where, out);
+    }
+
+    private static Bitmap decodeJpeg(byte[] jpeg) {
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                throw new IllegalStateException("无法读取这张照片");
+            }
+            int sample = 1;
+            while (Math.max(bounds.outWidth, bounds.outHeight) / sample > MAX_IMAGE_SIDE) {
+                sample *= 2;
+            }
+            BitmapFactory.Options opt = new BitmapFactory.Options();
+            opt.inSampleSize = sample;
+            opt.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            Bitmap bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, opt);
+            if (bmp == null) throw new IllegalStateException("无法读取这张照片");
+            int orientation = ExifInterface.ORIENTATION_NORMAL;
+            try {
+                orientation = new ExifInterface(new ByteArrayInputStream(jpeg))
+                        .getAttributeInt(ExifInterface.TAG_ORIENTATION,
+                                ExifInterface.ORIENTATION_NORMAL);
+            } catch (Throwable ignored) {
+            }
+            return applyExif(orientation, bmp);
+        } catch (Throwable t) {
+            Log.e(TAG, "decodeJpeg", t);
+            throw new IllegalStateException(t.getMessage() == null ? "无法读取这张照片" : t.getMessage());
+        }
     }
 
     private static Bitmap decodeImage(ContentResolver cr, Uri uri) {
@@ -165,6 +223,10 @@ public class GalleryProcessor {
             }
         } catch (Throwable ignored) {
         }
+        return applyExif(orientation, bmp);
+    }
+
+    private static Bitmap applyExif(int orientation, Bitmap bmp) {
         if (orientation == ExifInterface.ORIENTATION_NORMAL) return bmp;
         Matrix m = new Matrix();
         switch (orientation) {
@@ -203,7 +265,8 @@ public class GalleryProcessor {
         }
     }
 
-    private static Bitmap renderImage(Bitmap src, StylePreset style, float intensity) {
+    private static Bitmap renderImage(Bitmap src, StylePreset style, float intensity,
+                                     boolean spritesOn) {
         int sw = src.getWidth();
         int sh = src.getHeight();
         float scale = Math.min(1f, MAX_OUTPUT_SIDE / (float) Math.max(sw, sh));
@@ -212,7 +275,7 @@ public class GalleryProcessor {
         OfflineGl gl = new OfflineGl();
         gl.init();
         try {
-            return gl.renderImage(src, ow, oh, style, intensity);
+            return gl.renderImage(src, ow, oh, style, intensity, spritesOn);
         } finally {
             gl.release();
         }
@@ -221,7 +284,7 @@ public class GalleryProcessor {
     // ------------------------------------------------------------------ 视频
 
     private static void doVideo(Context ctx, Uri uri, StylePreset style, float intensity,
-                                AtomicBoolean cancel, Listener l) {
+                                boolean spritesOn, AtomicBoolean cancel, Listener l) {
         MediaExtractor extractor = new MediaExtractor();
         MediaExtractor audioExtractor = null;
         MediaCodec decoder = null;
@@ -371,9 +434,11 @@ public class GalleryProcessor {
                             holder.texture.updateTexImage();
                             holder.texture.getTransformMatrix(texMatrix);
                             long ptsUs = Math.max(lastPts, info.presentationTimeUs);
+                            float frameDt = lastPts > 0 ? (ptsUs - lastPts) / 1e6f : 1f / 30f;
+                            if (frameDt <= 0f || frameDt > 0.2f) frameDt = 1f / 30f;
                             lastPts = ptsUs;
                             gl.renderVideoFrame(outW, outH, srcW, srcH, texMatrix, style, intensity,
-                                    ptsUs * 1000L);
+                                    ptsUs * 1000L, spritesOn, frameDt);
                             if (audioTrackIndex >= 0 && audioExtractor != null) {
                                 try {
                                     copyAudioUpTo(audioExtractor, muxer, audioTrackIndex,
@@ -720,6 +785,16 @@ public class GalleryProcessor {
         private int oesTex;
         private SurfaceTextureHolder cameraHolder;
 
+        // 小精灵层（与相机里同一套 SDF 精灵 + 选址逻辑）
+        private Program pSprite, pCopy;
+        private SpriteSystem sprites;
+        private int contentFbo, contentTex;
+        private ByteBuffer contentBuf;
+        private byte[] contentBytes;
+        private int contentTick;
+        private float spriteTime;
+        private final float[] tint3 = new float[3];
+
         private final float[] identity = new float[]{
                 1, 0, 0, 0,
                 0, 1, 0, 0,
@@ -869,7 +944,8 @@ public class GalleryProcessor {
 
         // -------------------------------------------------------------- 图片
 
-        Bitmap renderImage(Bitmap src, int ow, int oh, StylePreset st, float intensity) {
+        Bitmap renderImage(Bitmap src, int ow, int oh, StylePreset st, float intensity,
+                           boolean spritesOn) {
             int sw = src.getWidth();
             int sh = src.getHeight();
             int tw = Math.max(2, sw / 2);
@@ -925,13 +1001,25 @@ public class GalleryProcessor {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texA);
                 GLES20.glUniform1i(pf.u("uBlur"), 1);
-                bindFinalUniforms(pf, st, intensity, 1f, 1f, 0f, sw, sh, tw, th, 0f,
+                bindFinalUniforms(pf, st, intensity, 1f, 1f, 0f, 1f, sw, sh, tw, th, 0f,
                         identity, 0f, 0f);
 
                 drawQuad(pf);
-                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
 
-                return readPixels(ow, oh);
+                if (spritesOn) {
+                    // 照片里的小精灵：先按画面内容选址，再模拟 2.4 秒让它们出场、淡入、站稳
+                    ensureSpriteLayer();
+                    readContentGrid(true);   // 会把 FBO 解绑，画完精灵前要重新绑回输出缓冲
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outFbo);
+                    GLES20.glViewport(0, 0, ow, oh);
+                    for (int i = 0; i < 72; i++) {
+                        updateSprites(1f / 30f);
+                    }
+                    drawSprites(ow, oh);
+                }
+                Bitmap result = readPixels(ow, oh);
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+                return result;
             } finally {
                 GLES20.glDeleteTextures(1, new int[]{srcTex}, 0);
                 GLES20.glDeleteFramebuffers(1, new int[]{outFbo}, 0);
@@ -967,7 +1055,7 @@ public class GalleryProcessor {
                     int a = buf.get(i + 3) & 0xFF;
                     row[x] = (a << 24) | (r << 16) | (g << 8) | b;
                 }
-                out.setPixels(row, 0, w, 0, y, w, 1);
+                out.setPixels(row, 0, w, 0, h - 1 - y, w, 1);
             }
             return out;
         }
@@ -975,7 +1063,8 @@ public class GalleryProcessor {
         // -------------------------------------------------------------- 视频
 
         void renderVideoFrame(int outW, int outH, int srcW, int srcH, float[] texMatrix,
-                             StylePreset st, float intensity, long ptsNs) {
+                             StylePreset st, float intensity, long ptsNs,
+                             boolean spritesOn, float dt) {
             if (!EGL14.eglMakeCurrent(display, encoderSurface, encoderSurface, context)) {
                 throw new IllegalStateException("编码器表面切换失败");
             }
@@ -1036,20 +1125,28 @@ public class GalleryProcessor {
             if (targetAspect < sourceAspect) cx = targetAspect / sourceAspect;
             else cy = sourceAspect / targetAspect;
             float snap = st.pixel > 1f ? (st.pixel / srcW) : 0f;
-            bindFinalUniforms(pf, st, intensity, cx, cy, 0f, srcW, srcH, tw, th, snap,
+            bindFinalUniforms(pf, st, intensity, cx, cy, 0f, 0f, srcW, srcH, tw, th, snap,
                     texMatrix, 0f, 0f);
             drawQuad(pf);
+
+            if (spritesOn) {
+                ensureSpriteLayer();
+                if (contentTick % 15 == 0) readContentGrid(false);
+                updateSprites(dt);
+                drawSprites(outW, outH);
+            }
 
             EGLExt.eglPresentationTimeANDROID(display, encoderSurface, ptsNs);
             EGL14.eglSwapBuffers(display, encoderSurface);
         }
 
         private void bindFinalUniforms(Program p, StylePreset st, float intensity,
-                                       float cx, float cy, float mirror, int srcW, int srcH,
-                                       int tw, int th, float snap, float[] texMatrix,
-                                       float time, float aspect) {
+                                       float cx, float cy, float mirror, float flipV,
+                                       int srcW, int srcH, int tw, int th, float snap,
+                                       float[] texMatrix, float time, float aspect) {
             GLES20.glUniform2f(p.u("uCrop"), cx, cy);
             GLES20.glUniform1f(p.u("uMirror"), mirror);
+            GLES20.glUniform1f(p.u("uFlipV"), flipV);
             GLES20.glUniform1f(p.u("uSnap"), snap);
             GLES20.glUniformMatrix4fv(p.u("uTexMatrix"), 1, false, texMatrix, 0);
             GLES20.glUniform2f(p.u("uTexel"), 1f / srcW, 1f / srcH);
@@ -1072,6 +1169,107 @@ public class GalleryProcessor {
             GLES20.glUniform1f(p.u("uAspect"), aspect);
             GLES20.glUniform4f(p.u("uRip0"), 0f, 0f, 9f, 0f);
             GLES20.glUniform4f(p.u("uRip1"), 0f, 0f, 9f, 0f);
+        }
+
+        // -------------------------------------------------------------- 小精灵
+
+        private static final String FS_COPY = "precision mediump float;\n"
+                + "uniform sampler2D uTex;\n"
+                + "varying vec2 vUv;\n"
+                + "void main() { gl_FragColor = vec4(texture2D(uTex, vUv).rgb, 1.0); }";
+
+        private void ensureSpriteLayer() {
+            if (sprites != null) return;
+            sprites = new SpriteSystem();
+            pSprite = new Program(SpriteShaders.VS_SPRITE, SpriteShaders.FS_SPRITE);
+            pCopy = new Program(CartoonRenderer.VS_PLAIN, FS_COPY);
+            int g = SpriteSystem.GRID;
+            contentTex = createTexture(g, g);
+            contentFbo = createFbo(contentTex);
+            contentBuf = ByteBuffer.allocateDirect(g * g * 4).order(ByteOrder.nativeOrder());
+            contentBytes = new byte[g * g * 4];
+            contentTick = 0;
+            spriteTime = 0f;
+        }
+
+        /** 16x16 内容缩略图：判断画面哪块平整、哪块亮，供小精灵选址。 */
+        private void readContentGrid(boolean flipRows) {
+            ensureSpriteLayer();
+            int g = SpriteSystem.GRID;
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, contentFbo);
+            GLES20.glViewport(0, 0, g, g);
+            GLES20.glUseProgram(pCopy.id);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texA);
+            GLES20.glUniform1i(pCopy.u("uTex"), 0);
+            drawQuad(pCopy);
+            GLES20.glReadPixels(0, 0, g, g, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, contentBuf);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            contentBuf.position(0);
+            if (flipRows) {
+                int rowBytes = g * 4;
+                for (int y = 0; y < g; y++) {
+                    contentBuf.position((g - 1 - y) * rowBytes);
+                    contentBuf.get(contentBytes, y * rowBytes, rowBytes);
+                }
+            } else {
+                contentBuf.get(contentBytes);
+            }
+            contentBuf.position(0);
+            sprites.setContent(contentBytes, g, g, 1f, 1f);
+            contentTick++;
+        }
+
+        private void updateSprites(float dt) {
+            if (sprites == null || dt <= 0f) return;
+            spriteTime += dt;
+            sprites.update(dt, spriteTime, 0f, 0f, 0f, 0f);
+        }
+
+        private void drawSprites(int vw, int vh) {
+            if (sprites == null || pSprite == null || vw <= 0 || vh <= 0) return;
+            boolean any = false;
+            for (SpriteSystem.Sprite s : sprites.sprites) {
+                if (s != null && s.fade > 0.01f) {
+                    any = true;
+                    break;
+                }
+            }
+            if (!any) return;
+
+            Program p = pSprite;
+            float k = vh / (float) vw;
+            GLES20.glEnable(GLES20.GL_BLEND);
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+            GLES20.glUseProgram(p.id);
+            GLES20.glUniform1f(p.u("uMirror"), 0f);
+            GLES20.glUniform1f(p.u("uTime"), spriteTime);
+
+            for (SpriteSystem.Sprite s : sprites.sprites) {
+                if (s == null || s.fade <= 0.01f) continue;
+                float halfY = s.size * s.fade * s.scale;
+                float halfX = halfY * k;
+                CartoonRenderer.hueColor(s.hue, s.sat, 1f, tint3);
+                GLES20.glUniform2f(p.u("uCenter"), s.u * 2f - 1f, s.v * 2f - 1f);
+                GLES20.glUniform2f(p.u("uHalf"), halfX, halfY);
+                GLES20.glUniform1f(p.u("uRot"), s.rot);
+                GLES20.glUniform1f(p.u("uShape"), 0f);
+                GLES20.glUniform3f(p.u("uTint"), tint3[0], tint3[1], tint3[2]);
+                GLES20.glUniform1f(p.u("uMood"), s.mood);
+                GLES20.glUniform1f(p.u("uBlink"), s.blink);
+                GLES20.glUniform1f(p.u("uSeed"), s.seed);
+                GLES20.glUniform2f(p.u("uSquash"), Math.max(0.05f, s.squashX),
+                        Math.max(0.05f, s.squashY));
+                GLES20.glUniform2f(p.u("uLook"), s.lookX, s.lookY);
+                GLES20.glUniform1f(p.u("uSpecies"), s.species);
+                GLES20.glUniform1f(p.u("uTemper"), s.temper);
+                GLES20.glUniform1f(p.u("uBounce"), s.bounce);
+                float halfPix = Math.max(3f, halfY * vh * 0.5f);
+                GLES20.glUniform1f(p.u("uAA"), 1.7f / halfPix);
+                GLES20.glUniform1f(p.u("uAlpha"), 1f);
+                drawQuad(p);
+            }
+            GLES20.glDisable(GLES20.GL_BLEND);
         }
 
         // -------------------------------------------------------------- 杂项
@@ -1108,6 +1306,11 @@ public class GalleryProcessor {
             }
             if (fboA != 0 || fboB != 0) deleteFbos();
             if (quad != 0) GLES20.glDeleteBuffers(1, new int[]{quad}, 0);
+            if (contentFbo != 0) GLES20.glDeleteFramebuffers(1, new int[]{contentFbo}, 0);
+            if (contentTex != 0) GLES20.glDeleteTextures(1, new int[]{contentTex}, 0);
+            if (pSprite != null) pSprite.delete();
+            if (pCopy != null) pCopy.delete();
+            sprites = null;
             if (pDownOes != null) pDownOes.delete();
             if (pDown2d != null) pDown2d.delete();
             if (pBlur != null) pBlur.delete();
