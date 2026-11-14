@@ -888,7 +888,7 @@ public class CartoonRenderer {
         }
     }
 
-    private static String glsl(String... lines) {
+    static String glsl(String... lines) {
         return String.join("\n", lines);
     }
 
@@ -947,7 +947,7 @@ public class CartoonRenderer {
 
     // ------------------------------------------------------------------ shaders
 
-    private static final String VS_CAMERA = glsl(
+    static final String VS_CAMERA = glsl(
             "attribute vec2 aPos;",
             "uniform mediump mat4 uTexMatrix;",
             "varying vec2 vUv;",
@@ -957,7 +957,7 @@ public class CartoonRenderer {
             "}"
     );
 
-    private static final String VS_PLAIN = glsl(
+    static final String VS_PLAIN = glsl(
             "attribute vec2 aPos;",
             "varying vec2 vUv;",
             "void main() {",
@@ -966,7 +966,7 @@ public class CartoonRenderer {
             "}"
     );
 
-    private static final String VS_FINAL = glsl(
+    static final String VS_FINAL = glsl(
             "attribute vec2 aPos;",
             "uniform mediump vec2 uCrop;",
             "uniform mediump float uMirror;",
@@ -980,7 +980,7 @@ public class CartoonRenderer {
     );
 
     /** 相机纹理 -> 半分辨率，2x2 盒式降采样。 */
-    private static final String FS_DOWN = glsl(
+    static final String FS_DOWN = glsl(
             "#extension GL_OES_EGL_image_external : require",
             "precision mediump float;",
             "uniform samplerExternalOES uTex;",
@@ -997,7 +997,7 @@ public class CartoonRenderer {
     );
 
     /** 可分离双边平滑（保边去细节，形成平整色块）。 */
-    private static final String FS_BLUR = glsl(
+    static final String FS_BLUR = glsl(
             "precision mediump float;",
             "uniform sampler2D uTex;",
             "varying vec2 vUv;",
@@ -1028,7 +1028,7 @@ public class CartoonRenderer {
             "}"
     );
 
-    private static final String FS_FINAL = glsl(
+    static final String FS_FINAL = glsl(
             "#extension GL_OES_EGL_image_external : require",
             "precision mediump float;",
             "varying vec2 vUv;",

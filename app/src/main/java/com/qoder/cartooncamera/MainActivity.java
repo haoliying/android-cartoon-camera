@@ -9,6 +9,7 @@ import android.content.ContentValues;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -42,6 +43,7 @@ import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
@@ -53,10 +55,15 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final String TAG = "CartoonCamera";
     private static final int REQ_PERMS = 21;
+    private static final int REQ_PICK = 31;
+    private static final int REQ_WRITE = 32;
     private static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
 
@@ -96,6 +103,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private TextView intensityValue;
     private SeekBar intensityBar;
     private final List<TextView> chips = new ArrayList<>();
+
+    // 相册卡通化
+    private TextView galleryBtn;
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private AlertDialog progressDialog;
+    private AtomicBoolean processingCancel;
+    private boolean processing;
+    private Uri pendingGalleryUri;
 
     private MediaRecorder recorder;
     private boolean recording = false;
@@ -161,6 +176,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (processingCancel != null) processingCancel.set(true);
+        worker.shutdownNow();
+        dismissProgress();
         ui.removeCallbacksAndMessages(null);
         if (cameraController != null) cameraController.shutdown();
         if (renderer != null) renderer.release();
@@ -204,6 +222,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setShadowLayer(dp(5), 0, dp(2), 0xAA000000);
         topBar.addView(title, new LinearLayout.LayoutParams(0, WRAP, 1f));
+
+        galleryBtn = new TextView(this);
+        galleryBtn.setText("相册");
+        galleryBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        galleryBtn.setTextColor(0xFFFFFFFF);
+        galleryBtn.setGravity(Gravity.CENTER);
+        GradientDrawable galleryBg = new GradientDrawable();
+        galleryBg.setShape(GradientDrawable.OVAL);
+        galleryBg.setColor(0x40000000);
+        galleryBg.setStroke(dp(1), 0x33FFFFFF);
+        galleryBtn.setBackground(galleryBg);
+        galleryBtn.setContentDescription("相册卡通化");
+        galleryBtn.setOnClickListener(v -> pickFromGallery());
+        LinearLayout.LayoutParams galleryLp = new LinearLayout.LayoutParams(dp(42), dp(42));
+        galleryLp.rightMargin = dp(8);
+        topBar.addView(galleryBtn, galleryLp);
 
         spriteBtn = new TextView(this);
         spriteBtn.setText("✦");
@@ -505,6 +539,131 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         prefs.edit().putString("style", preset.id).apply();
     }
 
+    // ------------------------------------------------------------------ 相册处理
+
+    private void pickFromGallery() {
+        if (processing) {
+            toast("正在处理，请稍候");
+            return;
+        }
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+        try {
+            startActivityForResult(i, REQ_PICK);
+        } catch (Throwable t) {
+            Log.e(TAG, "pick", t);
+            toast("无法打开相册");
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_PICK || resultCode != RESULT_OK || data == null) return;
+        Uri uri = data.getData();
+        if (uri == null) return;
+        try {
+            getContentResolver().takePersistableUriPermission(uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (Throwable ignored) {
+        }
+        pendingGalleryUri = uri;
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
+                && !hasPerm(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_WRITE);
+            return;
+        }
+        beginGallery(uri);
+    }
+
+    private void beginGallery(Uri uri) {
+        if (processing) {
+            toast("正在处理，请稍候");
+            return;
+        }
+        final StylePreset st = style;
+        final float in = intensity;
+        processing = true;
+        final AtomicBoolean cancel = new AtomicBoolean(false);
+        processingCancel = cancel;
+        if (galleryBtn != null) galleryBtn.setAlpha(0.4f);
+
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("卡通化处理中")
+                .setMessage("准备中…")
+                .setNegativeButton("取消", (d, w) -> cancel.set(true))
+                .setCancelable(false)
+                .create();
+        progressDialog = dialog;
+        dialog.show();
+
+        worker.execute(() -> GalleryProcessor.process(this, uri, null, st, in, cancel,
+                new GalleryProcessor.Listener() {
+                    @Override
+                    public void onProgress(float p, String label) {
+                        ui.post(() -> {
+                            if (progressDialog != null && progressDialog.isShowing()) {
+                                progressDialog.setMessage(label);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onDone(String message, Bitmap preview) {
+                        ui.post(() -> {
+                            finishProcessing();
+                            if (isFinishing() || isDestroyed()) return;
+                            if (preview != null) showPreview(message, preview);
+                            else toast(message);
+                        });
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        ui.post(() -> {
+                            finishProcessing();
+                            if (isFinishing() || isDestroyed()) return;
+                            toast(message);
+                        });
+                    }
+                }));
+    }
+
+    private void finishProcessing() {
+        processing = false;
+        processingCancel = null;
+        dismissProgress();
+        if (galleryBtn != null) galleryBtn.setAlpha(1f);
+    }
+
+    private void dismissProgress() {
+        AlertDialog d = progressDialog;
+        progressDialog = null;
+        if (d != null) {
+            try {
+                d.dismiss();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void showPreview(String message, Bitmap bmp) {
+        ImageView iv = new ImageView(this);
+        iv.setAdjustViewBounds(true);
+        iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        iv.setImageBitmap(bmp);
+        iv.setPadding(dp(8), dp(8), dp(8), dp(8));
+        new AlertDialog.Builder(this)
+                .setTitle("完成")
+                .setMessage(message)
+                .setView(iv)
+                .setPositiveButton("好", (d, w) -> iv.setImageDrawable(null))
+                .setOnDismissListener(d -> iv.setImageDrawable(null))
+                .show();
+    }
+
     // ------------------------------------------------------------------ permissions
 
     private boolean hasPerm(String permission) {
@@ -523,6 +682,16 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_WRITE) {
+            Uri uri = pendingGalleryUri;
+            pendingGalleryUri = null;
+            if (hasPerm(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+                if (uri != null) beginGallery(uri);
+            } else {
+                toast("没有存储权限，无法保存处理结果");
+            }
+            return;
+        }
         if (requestCode != REQ_PERMS) return;
         micAllowed = hasPerm(Manifest.permission.RECORD_AUDIO);
         if (hasPerm(Manifest.permission.CAMERA)) {
