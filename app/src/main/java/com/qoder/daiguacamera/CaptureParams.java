@@ -1,4 +1,4 @@
-package com.qoder.cartooncamera;
+package com.qoder.daiguacamera;
 
 /** 拍照参数：普通 / 专业 / 傻瓜 三种模式共用同一份描述，最后交给 Camera2。 */
 public class CaptureParams {

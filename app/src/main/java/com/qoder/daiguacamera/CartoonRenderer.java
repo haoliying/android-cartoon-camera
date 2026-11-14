@@ -1,4 +1,4 @@
-package com.qoder.cartooncamera;
+package com.qoder.daiguacamera;
 
 import android.graphics.Bitmap;
 import android.graphics.SurfaceTexture;

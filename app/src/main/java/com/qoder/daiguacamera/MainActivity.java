@@ -1,4 +1,4 @@
-package com.qoder.cartooncamera;
+package com.qoder.daiguacamera;
 
 import android.Manifest;
 import android.animation.ValueAnimator;
@@ -41,6 +41,7 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
@@ -114,6 +115,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     private int captureMode = MODE_VIDEO;
     private int photoSub = SUB_NORMAL;
+    private SceneStore sceneStore;
+    private java.util.List<ScenePreset> sceneList;
     private ScenePreset scene = ScenePreset.ALL[0];
     private CaptureParams proParams = new CaptureParams();
     private boolean capturing;
@@ -170,15 +173,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         captureMode = prefs.getInt("captureMode", MODE_VIDEO);
         photoSub = prefs.getInt("photoSub", SUB_NORMAL);
         loadProParams();
-        String sceneName = prefs.getString("scene", null);
-        if (sceneName != null) {
-            for (ScenePreset sp : ScenePreset.ALL) {
-                if (sp.name.equals(sceneName)) {
-                    scene = sp;
-                    break;
-                }
-            }
-        }
+        sceneStore = new SceneStore(this);
+        sceneList = sceneStore.scenes();
+        scene = sceneStore.find(prefs.getString("scene", null));
 
         renderer = new CartoonRenderer();
         renderer.setErrorListener(msg -> ui.post(() -> toast(msg)));
@@ -880,7 +877,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             extraSummary.setText(proParams.summary());
         } else {
             extraActionBtn.setText("换场景");
-            extraSummary.setText("场景 · " + scene.name + "：" + scene.hint);
+            String mark = scene.custom ? "（自定义）" : (scene.edited ? "（已调参）" : "");
+            extraSummary.setText("场景 · " + scene.name + mark + "：" + scene.hint);
         }
     }
 
@@ -1096,26 +1094,59 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(dp(12), dp(8), dp(12), dp(8));
 
+        TextView tip = new TextView(this);
+        tip.setText("点一下使用 · 长按调整参数 · 改过的会记在本机");
+        tip.setTextColor(0xFF9AA0B2);
+        tip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        tip.setPadding(dp(6), 0, dp(6), dp(8));
+        list.addView(tip);
+
+        LinearLayout addRow = new LinearLayout(this);
+        addRow.setOrientation(LinearLayout.HORIZONTAL);
+
+        TextView add = pill("＋ 新增场景", false);
+        add.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        add.setPadding(dp(12), dp(9), dp(12), dp(9));
+        add.setOnClickListener(v -> {
+            if (sceneDialog != null) sceneDialog.dismiss();
+            showSceneEditor(null, true);
+        });
+        LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(0, WRAP, 1f);
+        addLp.setMargins(dp(4), dp(2), dp(4), dp(6));
+        addRow.addView(add, addLp);
+
+        TextView edit = pill("调整当前", false);
+        edit.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        edit.setPadding(dp(12), dp(9), dp(12), dp(9));
+        edit.setOnClickListener(v -> {
+            if (sceneDialog != null) sceneDialog.dismiss();
+            showSceneEditor(scene, false);
+        });
+        LinearLayout.LayoutParams editLp = new LinearLayout.LayoutParams(0, WRAP, 1f);
+        editLp.setMargins(dp(4), dp(2), dp(4), dp(6));
+        addRow.addView(edit, editLp);
+
+        list.addView(addRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+
         LinearLayout row = null;
-        for (int i = 0; i < ScenePreset.ALL.length; i++) {
+        for (int i = 0; i < sceneList.size(); i++) {
             if (i % 3 == 0) {
                 row = new LinearLayout(this);
                 row.setOrientation(LinearLayout.HORIZONTAL);
                 list.addView(row, new LinearLayout.LayoutParams(MATCH, WRAP));
             }
-            final ScenePreset sp = ScenePreset.ALL[i];
-            TextView b = pill(sp.name, sp == scene);
+            final ScenePreset sp = sceneList.get(i);
+            String label = sp.name + (sp.custom ? " ·自" : (sp.edited ? " *" : ""));
+            TextView b = pill(label, sp == scene);
             b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             b.setPadding(dp(4), dp(9), dp(4), dp(9));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, WRAP, 1f);
             lp.setMargins(dp(4), dp(4), dp(4), dp(4));
-            b.setOnClickListener(v -> {
-                scene = sp;
-                prefs.edit().putString("scene", sp.name).apply();
-                applyCameraParams();
-                updateExtraUi();
-                toast(sp.name + " · " + sp.hint);
+            b.setOnClickListener(v -> selectScene(sp));
+            b.setOnLongClickListener(v -> {
                 if (sceneDialog != null) sceneDialog.dismiss();
+                showSceneEditor(sp, false);
+                return true;
             });
             row.addView(b, lp);
         }
@@ -1128,6 +1159,154 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 .setNegativeButton("关闭", null)
                 .create();
         sceneDialog.show();
+    }
+
+    private void selectScene(ScenePreset sp) {
+        scene = sp;
+        prefs.edit().putString("scene", sp.id).apply();
+        applyCameraParams();
+        updateExtraUi();
+        toast(sp.name + " · " + sp.hint);
+        if (sceneDialog != null) sceneDialog.dismiss();
+    }
+
+    /**
+     * 场景参数编辑器：和“专业参数”同一组滑块，另外多了名字与保存/恢复默认。
+     * 内置场景不能改名、可以恢复默认；自定义场景可改名、可删除。
+     */
+    private void showSceneEditor(ScenePreset base, boolean isNew) {
+        final boolean custom = base != null && base.custom;
+        final boolean builtin = base != null && !base.custom;
+
+        final int[] isoIdx = {base == null ? 2 : (base.manual ? Math.max(1, isoIndexOf(base.iso)) : 0)};
+        final int[] shIdx = {base == null ? 4 : (base.manual ? Math.max(1, shutterIndexOf(base.exposureNs)) : 0)};
+        final int[] evIdx = {Math.round(((base == null ? 0f : base.ev) + 2f) / 0.1f)};
+        final int[] wbIdx = {base == null || base.wbAuto ? 0 : kelvinIndexOf(base.kelvin)};
+        final int[] focusIdx = {base == null ? 0
+                : base.focusMode == CaptureParams.FOCUS_AUTO ? 0
+                : base.focusMode == CaptureParams.FOCUS_INFINITY ? 1
+                : base.focusMode == CaptureParams.FOCUS_MACRO ? 2 : 3};
+        final int[] distIdx = {base == null ? 0
+                : Math.round(Math.max(0f, Math.min(10f, base.diopter)) * 10f)};
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(8), dp(20), dp(4));
+
+        EditText nameEt = new EditText(this);
+        nameEt.setHint("场景名称，例如 海边人像");
+        nameEt.setSingleLine(true);
+        nameEt.setText(base == null ? "" : base.name);
+        nameEt.setEnabled(isNew || custom);
+        box.addView(nameEt, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        EditText hintEt = new EditText(this);
+        hintEt.setHint("一句话提示（可空）");
+        hintEt.setSingleLine(true);
+        hintEt.setText(base == null ? "" : base.hint);
+        box.addView(hintEt, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        addSeek(box, "ISO", ISO_LABELS, isoIdx[0], v -> isoIdx[0] = v);
+        addSeek(box, "快门", SHUTTER_LABELS, shIdx[0], v -> shIdx[0] = v);
+        addSeek(box, "曝光补偿", EV_LABELS, evIdx[0], v -> evIdx[0] = v);
+        addSeek(box, "白平衡", WB_LABELS, wbIdx[0], v -> wbIdx[0] = v);
+        addSeek(box, "对焦", FOCUS_LABELS, focusIdx[0], v -> focusIdx[0] = v);
+        addSeek(box, "手动焦距", FOCUS_DIST_LABELS, distIdx[0], v -> distIdx[0] = v);
+
+        TextView note = new TextView(this);
+        note.setText("ISO 和快门都选“自动”时按自动曝光，只叠加曝光补偿；任一手动即切到手动曝光。");
+        note.setTextColor(0xFF9AA0B2);
+        note.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        note.setPadding(0, dp(6), 0, dp(2));
+        box.addView(note);
+
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(box);
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle(isNew ? "新增场景" : (custom ? "编辑自定义场景" : "调整场景参数 · " + base.name))
+                .setView(scroll)
+                .setPositiveButton("保存", (d, w) -> {
+                    String nm = nameEt.getText().toString().trim();
+                    String ht = hintEt.getText().toString().trim();
+                    ScenePreset target;
+                    if (isNew) {
+                        if (nm.isEmpty()) nm = "自定义场景" + (sceneList.size() + 1);
+                        target = new ScenePreset("c" + System.currentTimeMillis(), nm,
+                                ht.isEmpty() ? "自定义场景" : ht, true, 200,
+                                1_000_000_000L / 125, 0f, 5200, true,
+                                CaptureParams.FOCUS_AUTO, 0f);
+                        target.custom = true;
+                    } else {
+                        target = base;
+                        if (custom) {
+                            if (!nm.isEmpty()) target.name = nm;
+                            if (!ht.isEmpty()) target.hint = ht;
+                        } else if (!ht.isEmpty()) {
+                            target.hint = ht;
+                        }
+                    }
+                    target.manual = isoIdx[0] > 0 || shIdx[0] > 0;
+                    target.iso = isoIdx[0] > 0 ? ISO_VALUES[isoIdx[0]] : 200;
+                    target.exposureNs = shIdx[0] > 0 ? SHUTTER_VALUES[shIdx[0]]
+                            : 1_000_000_000L / 125;
+                    target.ev = -2f + evIdx[0] * 0.1f;
+                    target.wbAuto = wbIdx[0] == 0;
+                    target.kelvin = target.wbAuto ? 5200 : 2300 + (wbIdx[0] - 1) * 100;
+                    target.focusMode = focusIdx[0] == 0 ? CaptureParams.FOCUS_AUTO
+                            : focusIdx[0] == 1 ? CaptureParams.FOCUS_INFINITY
+                            : focusIdx[0] == 2 ? CaptureParams.FOCUS_MACRO
+                            : CaptureParams.FOCUS_MANUAL;
+                    target.diopter = distIdx[0] / 10f;
+                    if (builtin) {
+                        target.edited = target.differsFrom(ScenePreset.defaultById(target.id));
+                    }
+                    if (isNew) {
+                        sceneStore.add(target);
+                    } else {
+                        sceneStore.persist();
+                    }
+                    scene = target;
+                    prefs.edit().putString("scene", target.id).apply();
+                    applyCameraParams();
+                    updateExtraUi();
+                    toast(isNew ? "已新增场景 · " + target.name : "已保存 · " + target.name);
+                })
+                .setNegativeButton("取消", null);
+
+        if (custom) {
+            builder.setNeutralButton("删除", (d, w) -> confirmDeleteScene(base));
+        } else if (builtin) {
+            builder.setNeutralButton("恢复默认", (d, w) -> {
+                sceneStore.reset(base);
+                if (scene == base) applyCameraParams();
+                updateExtraUi();
+                toast("已恢复默认参数 · " + base.name);
+            });
+        }
+        builder.show();
+    }
+
+    private void confirmDeleteScene(ScenePreset sp) {
+        new AlertDialog.Builder(this)
+                .setTitle("删除场景")
+                .setMessage("确定删除「" + sp.name + "」吗？")
+                .setPositiveButton("删除", (d, w) -> {
+                    sceneStore.remove(sp);
+                    if (scene == sp) {
+                        scene = sceneList.isEmpty() ? ScenePreset.ALL[0].copy() : sceneList.get(0);
+                        prefs.edit().putString("scene", scene.id).apply();
+                    }
+                    applyCameraParams();
+                    updateExtraUi();
+                    toast("已删除 · " + sp.name);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private static int kelvinIndexOf(int kelvin) {
+        return Math.max(1, Math.min(57, (kelvin - 2300) / 100 + 1));
     }
 
     private AlertDialog sceneDialog;

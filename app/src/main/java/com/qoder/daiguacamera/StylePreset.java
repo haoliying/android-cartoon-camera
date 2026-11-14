@@ -1,4 +1,4 @@
-package com.qoder.cartooncamera;
+package com.qoder.daiguacamera;
 
 /** 一组卡通渲染风格参数。 */
 public class StylePreset {

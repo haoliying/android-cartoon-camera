@@ -1,4 +1,4 @@
-package com.qoder.cartooncamera;
+package com.qoder.daiguacamera;
 
 import android.content.ContentResolver;
 import android.content.ContentValues;

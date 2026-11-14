@@ -1,4 +1,4 @@
-package com.qoder.cartooncamera;
+package com.qoder.daiguacamera;
 
 /** 小精灵与粒子（爱心/星星/涟漪）的着色器：全程序化 SDF 绘制，不依赖贴图。 */
 final class SpriteShaders {
