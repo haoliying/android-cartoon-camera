@@ -156,6 +156,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private TextView zoomChip;
     private TextView zoomCollapse;
     private boolean zoomCollapsed;
+    /** 广角：后置主摄的 cameraId 与独立超广角 cameraId（没有则为 null）。 */
+    private TextView wideBtn;
+    private String wideLensId;
+    private String backLensId;
+    private boolean wideResolved;
     private LinearLayout panelContent;
     private TextView panelHandle;
     private boolean panelCollapsed;
@@ -410,6 +415,17 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         zoomLp.topMargin = dp(64);
         zoomLp.rightMargin = dp(8);
         root.addView(zoomBox, zoomLp);
+
+        // 有些机型把超广角做成独立摄像头，变焦范围里没有 <1×，用这个按钮切过去
+        wideBtn = circleButton("广角", 10, 48);
+        wideBtn.setContentDescription("切到超广角镜头");
+        wideBtn.setOnClickListener(v -> toggleWideLens());
+        wideBtn.setVisibility(View.GONE);
+        FrameLayout.LayoutParams wideLp = new FrameLayout.LayoutParams(dp(48), dp(48));
+        wideLp.gravity = Gravity.TOP | Gravity.END;
+        wideLp.topMargin = dp(218);
+        wideLp.rightMargin = dp(10);
+        root.addView(wideBtn, wideLp);
 
         // 点击对焦的白色圆环
         focusRing = new View(this);
@@ -781,6 +797,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         zoomDial.setZoom(cameraController.getZoom());
         if (renderer != null) renderer.setExtraZoom(cameraController.extraZoom());
         updateZoomChip();
+        updateWideUi();
     }
 
     /** 统一入口：相机 + 渲染层软件放大 + 控制盘 + 收起后的小圆钮。 */
@@ -824,6 +841,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             zoomBox.setLayoutParams(lp);
         }
         updateZoomChip();
+        updateWideUi();
     }
 
     private void setPanelCollapsed(boolean collapsed) {
@@ -2584,6 +2602,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         return cameraController.getSensorOrientation(facing);
     }
 
+    private int getSensorOrientation(int facing, String lensId) {
+        return cameraController.getSensorOrientation(facing, lensId);
+    }
+
     private final CartoonRenderer.Callback cameraCallback = new CartoonRenderer.Callback() {
         @Override
         public void onCameraSurfaceReady(Surface surface, int frameWidth, int frameHeight) {
@@ -2605,22 +2627,85 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (!surfaceReady || cameraSurface == null || cameraOpened) return;
         if (!hasPerm(Manifest.permission.CAMERA)) return;
         cameraOpened = true;
-        cameraController.open(facing, cameraSurface, new CameraController.Listener() {
+        final String lens = facing == CameraCharacteristics.LENS_FACING_BACK ? backLensId : null;
+        cameraController.open(facing, lens, cameraSurface, new CameraController.Listener() {
             @Override
             public void onOpened() {
                 ui.post(() -> {
                     updateFlashUi();
                     applyFlashState();
                     syncZoomUi();
+                    resolveWideLens();
                 });
             }
 
             @Override
             public void onError(String message) {
-                cameraOpened = false;
-                ui.post(() -> toast(message));
+                ui.post(() -> {
+                    cameraOpened = false;
+                    if (lens != null) {
+                        // 广角打不开就退回主摄，不让画面停在黑屏
+                        backLensId = null;
+                        toast("广角镜头不可用，已切回主摄");
+                        restartForLens();
+                    } else {
+                        toast(message);
+                    }
+                });
             }
         });
+    }
+
+    /** 查一次后置有没有独立的超广角镜头，并决定是否显示「广角」按钮。 */
+    private void resolveWideLens() {
+        if (facing != CameraCharacteristics.LENS_FACING_BACK) {
+            updateWideUi();
+            return;
+        }
+        if (!wideResolved && cameraController != null) {
+            wideLensId = cameraController.findWideBackId();
+            wideResolved = true;
+        }
+        updateWideUi();
+    }
+
+    /**
+     * 只有「变焦范围到不了 1× 以下」且机型确实有独立广角时才显示按钮；
+     * 支持 0.5× 变焦比例的机型直接用焦距盘旋到广角即可。
+     */
+    private void updateWideUi() {
+        if (wideBtn == null) return;
+        boolean usable = facing == CameraCharacteristics.LENS_FACING_BACK
+                && wideLensId != null && !zoomCollapsed;
+        boolean show = usable && cameraController != null
+                && (backLensId != null || cameraController.minZoom() >= 0.99f);
+        wideBtn.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (!show) return;
+        boolean wide = backLensId != null;
+        wideBtn.setText(wide ? "主摄" : "广角");
+        wideBtn.setContentDescription(wide ? "切回后置主摄" : "切到超广角镜头");
+        wideBtn.setAlpha(wide ? 1f : 0.82f);
+    }
+
+    private void toggleWideLens() {
+        if (recording || recorderStarted) {
+            toast("录制中无法切换镜头");
+            return;
+        }
+        if (capturing || wideLensId == null) return;
+        cameraOpened = false;
+        cameraController.closeAndWait();
+        backLensId = backLensId == null ? wideLensId : null;
+        toast(backLensId != null ? "超广角镜头" : "后置主摄");
+        restartForLens();
+    }
+
+    /** 按当前镜头重建预览 Surface 并重新打开相机。 */
+    private void restartForLens() {
+        cameraSize = cameraController.pickPreviewSize(facing, backLensId);
+        boolean swap = getSensorOrientation(facing, backLensId) % 180 != 0;
+        renderer.createCameraSurface(cameraSize, swap, cameraCallback);
+        updateWideUi();
     }
 
     private void flipCamera() {
@@ -2632,6 +2717,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         facing = (facing == CameraCharacteristics.LENS_FACING_BACK)
                 ? CameraCharacteristics.LENS_FACING_FRONT
                 : CameraCharacteristics.LENS_FACING_BACK;
+        backLensId = null;
+        wideLensId = null;
+        wideResolved = false;
         mirror = facing == CameraCharacteristics.LENS_FACING_FRONT;
         renderer.setMirror(mirror);
         cameraOpened = false;
@@ -2639,6 +2727,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         cameraSize = cameraController.pickPreviewSize(facing);
         boolean swap = getSensorOrientation(facing) % 180 != 0;
         renderer.createCameraSurface(cameraSize, swap, cameraCallback);
+        updateWideUi();
     }
 
     // ------------------------------------------------------------------ recording

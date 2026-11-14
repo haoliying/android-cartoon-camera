@@ -25,6 +25,7 @@ import android.util.Log;
 import android.util.Range;
 import android.util.Rational;
 import android.util.Size;
+import android.util.SizeF;
 import android.view.Surface;
 
 import java.nio.ByteBuffer;
@@ -84,6 +85,8 @@ public class CameraController {
     private volatile boolean zoomKnown = false;
     private volatile boolean zoomRatioSupported = false;
     private volatile float ratioMax = 1f;
+    /** 当前打开的具体摄像头 ID（后置主摄 / 后置广角可能是不同 ID）。 */
+    private volatile String activeCameraId;
     private android.graphics.Rect activeArray;
     private final Runnable applyRepeatingRunnable = this::applyRepeating;
 
@@ -124,9 +127,57 @@ public class CameraController {
         return null;
     }
 
-    public int getSensorOrientation(int facing) {
+    /**
+     * 找后置的超广角镜头：视场角明显大于主摄、且能预览和拍照的独立摄像头 ID。
+     * 有些机型把广角作为独立 ID 暴露，系统相机的 0.5× 就是切到这颗。
+     */
+    public String findWideBackId() {
         try {
-            String id = findCameraId(facing);
+            String mainId = findCameraId(CameraCharacteristics.LENS_FACING_BACK);
+            if (mainId == null) return null;
+            float mainFov = horizontalFov(manager.getCameraCharacteristics(mainId));
+            if (mainFov <= 0f) return null;
+            String best = null;
+            // 超广角至少要比主摄广 15°，且水平视场角普遍在 92° 以上，避免误认微距镜头
+            float bestFov = Math.max(mainFov + 15f, 92f);
+            for (String id : manager.getCameraIdList()) {
+                if (id.equals(mainId)) continue;
+                CameraCharacteristics c = manager.getCameraCharacteristics(id);
+                Integer f = c.get(CameraCharacteristics.LENS_FACING);
+                if (f == null || f != CameraCharacteristics.LENS_FACING_BACK) continue;
+                StreamConfigurationMap map =
+                        c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+                if (map == null) continue;
+                if (map.getOutputSizes(ImageFormat.JPEG) == null
+                        || map.getOutputSizes(SurfaceTexture.class) == null) continue;
+                float fov = horizontalFov(c);
+                if (fov > bestFov) {
+                    bestFov = fov;
+                    best = id;
+                }
+            }
+            return best;
+        } catch (Throwable t) {
+            Log.w(TAG, "findWideBackId", t);
+            return null;
+        }
+    }
+
+    /** 传感器水平视场角（度），用来区分主摄和超广角。 */
+    private float horizontalFov(CameraCharacteristics c) {
+        SizeF size = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE);
+        float[] fl = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
+        if (size == null || fl == null || fl.length == 0 || fl[0] <= 0f) return 0f;
+        return (float) Math.toDegrees(2.0 * Math.atan(size.getWidth() / (2.0 * fl[0])));
+    }
+
+    public int getSensorOrientation(int facing) {
+        return getSensorOrientation(facing, null);
+    }
+
+    public int getSensorOrientation(int facing, String idOverride) {
+        try {
+            String id = idOverride != null ? idOverride : findCameraId(facing);
             if (id == null) return 90;
             Integer o = manager.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_ORIENTATION);
             return o == null ? 90 : o;
@@ -136,8 +187,12 @@ public class CameraController {
     }
 
     public Size pickPreviewSize(int facing) {
+        return pickPreviewSize(facing, null);
+    }
+
+    public Size pickPreviewSize(int facing, String idOverride) {
         try {
-            String id = findCameraId(facing);
+            String id = idOverride != null ? idOverride : findCameraId(facing);
             if (id == null) return new Size(1280, 720);
             StreamConfigurationMap map = manager.getCameraCharacteristics(id)
                     .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
@@ -181,8 +236,12 @@ public class CameraController {
 
     /** 挑一个“够用又不撑爆内存”的 JPEG 尺寸：偏好 4:3、长边 2000 左右。 */
     public Size pickStillSize(int facing) {
+        return pickStillSize(facing, null);
+    }
+
+    public Size pickStillSize(int facing, String idOverride) {
         try {
-            String id = findCameraId(facing);
+            String id = idOverride != null ? idOverride : findCameraId(facing);
             if (id == null) return new Size(1920, 1440);
             StreamConfigurationMap map = manager.getCameraCharacteristics(id)
                     .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
@@ -406,7 +465,7 @@ public class CameraController {
         lastIso = 0;
         lastExposureNs = 0;
         try {
-            String id = findCameraId(facing);
+            String id = activeCameraId != null ? activeCameraId : findCameraId(facing);
             if (id == null) return;
             CameraCharacteristics c = manager.getCameraCharacteristics(id);
             isoRange = c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
@@ -479,15 +538,21 @@ public class CameraController {
     }
 
     public void open(int facing, Surface surface, Listener listener) {
+        open(facing, null, surface, listener);
+    }
+
+    /** idOverride 为 null 时按 facing 自动选；传广角 ID 可以打开后置超广角镜头。 */
+    public void open(int facing, String idOverride, Surface surface, Listener listener) {
         final int gen = ++generation;
         handler.post(() -> {
             closeInternal();
             try {
-                final String id = findCameraId(facing);
+                final String id = idOverride != null ? idOverride : findCameraId(facing);
                 if (id == null) {
                     postError(listener, "未找到可用的摄像头");
                     return;
                 }
+                activeCameraId = id;
                 loadCharacteristics(facing);
                 previewSurface = surface;
                 createStillReader(facing);
@@ -534,7 +599,7 @@ public class CameraController {
             stillSurface = null;
         }
         try {
-            Size size = pickStillSize(facing);
+            Size size = pickStillSize(facing, activeCameraId);
             stillReader = ImageReader.newInstance(size.getWidth(), size.getHeight(),
                     ImageFormat.JPEG, 2);
             stillReader.setOnImageAvailableListener(this::onJpegReady, handler);
