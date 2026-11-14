@@ -123,15 +123,20 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     private int captureMode = MODE_VIDEO;
     private int photoSub = SUB_NORMAL;
+    private int videoSub = SUB_NORMAL;
     private SceneStore sceneStore;
     private java.util.List<ScenePreset> sceneList;
     private ScenePreset scene = ScenePreset.ALL[0];
+    private ScenePreset videoScene = ScenePreset.ALL[0];
     private CaptureParams proParams = new CaptureParams();
+    private CaptureParams videoProParams = new CaptureParams();
     private boolean capturing;
+
+    /** 录像手动快门上限：1/30 秒，超过会掉帧。 */
+    private static final long VIDEO_MAX_EXPOSURE_NS = 1_000_000_000L / 30;
 
     private TextView videoPill, photoPill;
     private TextView subNormalPill, subProPill, subIdiotPill;
-    private LinearLayout modeRow;
     private LinearLayout extraRow;
     private TextView extraSummary;
     private TextView extraActionBtn;
@@ -184,10 +189,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         spritesOn = prefs.getBoolean("sprites", false);
         captureMode = prefs.getInt("captureMode", MODE_VIDEO);
         photoSub = prefs.getInt("photoSub", SUB_NORMAL);
-        loadProParams();
+        videoSub = prefs.getInt("videoSub", SUB_NORMAL);
+        proParams = loadProParams("pro_", true);
+        videoProParams = loadProParams("vpro_", false);
         sceneStore = new SceneStore(this);
         sceneList = sceneStore.scenes();
         scene = sceneStore.find(prefs.getString("scene", null));
+        videoScene = sceneStore.find(prefs.getString("video_scene", null));
 
         renderer = new CartoonRenderer();
         renderer.setErrorListener(msg -> ui.post(() -> toast(msg)));
@@ -383,49 +391,93 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         bottomPanel.setBackground(panelBg);
         bottomPanel.setPadding(0, dp(26), 0, dp(10));
 
-        // 拍摄模式：录像 / 拍照（普通·专业·傻瓜）
-        HorizontalScrollView modeScroll = new HorizontalScrollView(this);
-        modeScroll.setHorizontalScrollBarEnabled(false);
-        modeRow = new LinearLayout(this);
-        modeRow.setOrientation(LinearLayout.HORIZONTAL);
-        modeRow.setPadding(dp(16), 0, dp(8), dp(2));
-        modeScroll.addView(modeRow, new HorizontalScrollView.LayoutParams(WRAP, WRAP));
+        // 第一层：录像 / 拍照（大号分段控件，和下面两层明显区分）
+        LinearLayout segRow = new LinearLayout(this);
+        segRow.setOrientation(LinearLayout.HORIZONTAL);
+        segRow.setGravity(Gravity.CENTER);
 
-        videoPill = pill("录像", true);
+        LinearLayout captureSeg = new LinearLayout(this);
+        captureSeg.setOrientation(LinearLayout.HORIZONTAL);
+        GradientDrawable segBg = new GradientDrawable();
+        segBg.setColor(0x1FFFFFFF);
+        segBg.setCornerRadius(dp(23));
+        segBg.setStroke(dp(1), 0x3DFFFFFF);
+        captureSeg.setBackground(segBg);
+        captureSeg.setPadding(dp(4), dp(4), dp(4), dp(4));
+
+        videoPill = segment("录像", true);
         videoPill.setOnClickListener(v -> setCaptureMode(MODE_VIDEO));
-        addPill(modeRow, videoPill);
+        captureSeg.addView(videoPill, new LinearLayout.LayoutParams(0, dp(36), 1f));
 
-        photoPill = pill("拍照", false);
+        photoPill = segment("拍照", false);
         photoPill.setOnClickListener(v -> setCaptureMode(MODE_PHOTO));
-        addPill(modeRow, photoPill);
+        LinearLayout.LayoutParams photoSegLp = new LinearLayout.LayoutParams(0, dp(36), 1f);
+        photoSegLp.leftMargin = dp(4);
+        captureSeg.addView(photoPill, photoSegLp);
+
+        LinearLayout.LayoutParams segLp = new LinearLayout.LayoutParams(dp(212), WRAP);
+        segRow.addView(captureSeg, segLp);
+        LinearLayout.LayoutParams segRowLp = new LinearLayout.LayoutParams(MATCH, WRAP);
+        segRowLp.bottomMargin = dp(7);
+        bottomPanel.addView(segRow, segRowLp);
+
+        // 第二层：模式（普通 / 专业 / 傻瓜），录像和拍照共用
+        LinearLayout subRow = new LinearLayout(this);
+        subRow.setOrientation(LinearLayout.HORIZONTAL);
+        subRow.setGravity(Gravity.CENTER_VERTICAL);
+        subRow.setPadding(dp(20), 0, dp(12), dp(2));
+
+        TextView subLabel = new TextView(this);
+        subLabel.setText("模式");
+        subLabel.setTextColor(0xFF8F94A6);
+        subLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        subLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        LinearLayout.LayoutParams subLabelLp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        subLabelLp.rightMargin = dp(10);
+        subRow.addView(subLabel, subLabelLp);
 
         subNormalPill = pill("普通", true);
-        subNormalPill.setOnClickListener(v -> setPhotoSub(SUB_NORMAL));
-        addPill(modeRow, subNormalPill);
+        subNormalPill.setOnClickListener(v -> setSub(SUB_NORMAL));
+        addPill(subRow, subNormalPill);
 
         subProPill = pill("专业", false);
-        subProPill.setOnClickListener(v -> setPhotoSub(SUB_PRO));
-        addPill(modeRow, subProPill);
+        subProPill.setOnClickListener(v -> setSub(SUB_PRO));
+        addPill(subRow, subProPill);
 
         subIdiotPill = pill("傻瓜", false);
-        subIdiotPill.setOnClickListener(v -> setPhotoSub(SUB_IDIOT));
-        addPill(modeRow, subIdiotPill);
+        subIdiotPill.setOnClickListener(v -> setSub(SUB_IDIOT));
+        addPill(subRow, subIdiotPill);
 
-        bottomPanel.addView(modeScroll, new LinearLayout.LayoutParams(MATCH, WRAP));
+        bottomPanel.addView(subRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        // 第三层：风格（卡通滤镜，独立于拍摄模式和模式）
+        LinearLayout styleWrap = new LinearLayout(this);
+        styleWrap.setOrientation(LinearLayout.HORIZONTAL);
+        styleWrap.setGravity(Gravity.CENTER_VERTICAL);
+        styleWrap.setPadding(dp(20), dp(5), 0, dp(2));
+
+        TextView styleLabel = new TextView(this);
+        styleLabel.setText("风格");
+        styleLabel.setTextColor(0xFF8F94A6);
+        styleLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        styleLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        LinearLayout.LayoutParams styleLabelLp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        styleLabelLp.rightMargin = dp(10);
+        styleWrap.addView(styleLabel, styleLabelLp);
 
         HorizontalScrollView styleScroll = new HorizontalScrollView(this);
         styleScroll.setHorizontalScrollBarEnabled(false);
         LinearLayout styleRow = new LinearLayout(this);
         styleRow.setOrientation(LinearLayout.HORIZONTAL);
-        styleRow.setPadding(dp(16), 0, dp(8), dp(2));
+        styleRow.setPadding(0, 0, dp(8), dp(2));
         styleScroll.addView(styleRow, new HorizontalScrollView.LayoutParams(WRAP, WRAP));
 
         for (final StylePreset p : StylePreset.ALL) {
             TextView chip = new TextView(this);
             chip.setText(p.name);
-            chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
             chip.setGravity(Gravity.CENTER);
-            chip.setPadding(dp(16), dp(8), dp(16), dp(9));
+            chip.setPadding(dp(14), dp(7), dp(14), dp(8));
             LinearLayout.LayoutParams chipLp = new LinearLayout.LayoutParams(WRAP, WRAP);
             chipLp.rightMargin = dp(8);
             chip.setLayoutParams(chipLp);
@@ -436,7 +488,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             chips.add(chip);
             styleRow.addView(chip);
         }
-        bottomPanel.addView(styleScroll, new LinearLayout.LayoutParams(MATCH, WRAP));
+        styleWrap.addView(styleScroll, new LinearLayout.LayoutParams(0, WRAP, 1f));
+        bottomPanel.addView(styleWrap, new LinearLayout.LayoutParams(MATCH, WRAP));
 
         LinearLayout sliderRow = new LinearLayout(this);
         sliderRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -975,6 +1028,37 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         t.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
     }
 
+    /** 第一层的大分段按钮：选中时填充渐变，未选中透明。 */
+    private TextView segment(String text, boolean active) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        t.setGravity(Gravity.CENTER);
+        t.setBackground(segmentBg(active));
+        t.setTextColor(active ? 0xFFFFFFFF : 0xFFB9BDCC);
+        if (active) t.setTypeface(Typeface.DEFAULT_BOLD);
+        return t;
+    }
+
+    private GradientDrawable segmentBg(boolean active) {
+        GradientDrawable d = new GradientDrawable();
+        d.setCornerRadius(dp(19));
+        if (active) {
+            d.setOrientation(GradientDrawable.Orientation.LEFT_RIGHT);
+            d.setColors(new int[]{0xFFFF5C7A, 0xFFFF9A5C});
+        } else {
+            d.setColor(Color.TRANSPARENT);
+        }
+        return d;
+    }
+
+    private void styleSegment(TextView t, boolean active) {
+        if (t == null) return;
+        t.setBackground(segmentBg(active));
+        t.setTextColor(active ? 0xFFFFFFFF : 0xFFB9BDCC);
+        t.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+    }
+
     private void setCaptureMode(int mode) {
         if (capturing || mode == captureMode) return;
         if (recording || recorderStarted) {
@@ -988,25 +1072,38 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         applyCameraParams();
     }
 
-    private void setPhotoSub(int sub) {
-        if (capturing || sub == photoSub) return;
-        photoSub = sub;
-        prefs.edit().putInt("photoSub", photoSub).apply();
+    private void setSub(int sub) {
+        if (capturing) return;
+        if (recording || recorderStarted) {
+            toast("录制中不能切换模式，先停止录像");
+            return;
+        }
+        if (captureMode == MODE_PHOTO) {
+            if (sub == photoSub) return;
+            photoSub = sub;
+            prefs.edit().putInt("photoSub", photoSub).apply();
+        } else {
+            if (sub == videoSub) return;
+            videoSub = sub;
+            prefs.edit().putInt("videoSub", videoSub).apply();
+        }
         updateModeUi();
         applyCameraParams();
     }
 
+    private int currentSub() {
+        return captureMode == MODE_PHOTO ? photoSub : videoSub;
+    }
+
     private void updateModeUi() {
         boolean photo = captureMode == MODE_PHOTO;
-        stylePill(videoPill, !photo);
-        stylePill(photoPill, photo);
-        int subVis = photo ? View.VISIBLE : View.GONE;
-        subNormalPill.setVisibility(subVis);
-        subProPill.setVisibility(subVis);
-        subIdiotPill.setVisibility(subVis);
-        stylePill(subNormalPill, photoSub == SUB_NORMAL);
-        stylePill(subProPill, photoSub == SUB_PRO);
-        stylePill(subIdiotPill, photoSub == SUB_IDIOT);
+        styleSegment(videoPill, !photo);
+        styleSegment(photoPill, photo);
+
+        int sub = currentSub();
+        stylePill(subNormalPill, sub == SUB_NORMAL);
+        stylePill(subProPill, sub == SUB_PRO);
+        stylePill(subIdiotPill, sub == SUB_IDIOT);
 
         GradientDrawable d = (GradientDrawable) recordInner.getBackground();
         if (d != null) {
@@ -1019,44 +1116,82 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     private void updateExtraUi() {
         if (extraRow == null) return;
-        if (captureMode != MODE_PHOTO || photoSub == SUB_NORMAL) {
+        int sub = currentSub();
+        if (sub == SUB_NORMAL) {
             extraRow.setVisibility(View.GONE);
             return;
         }
         extraRow.setVisibility(View.VISIBLE);
-        if (photoSub == SUB_PRO) {
+        boolean video = captureMode == MODE_VIDEO;
+        if (sub == SUB_PRO) {
             extraActionBtn.setText("调整");
-            extraSummary.setText(proParams.summary());
+            CaptureParams p = video ? videoProParams : proParams;
+            String s = p.summary();
+            if (video && p.manualExposure && p.exposureNs > VIDEO_MAX_EXPOSURE_NS) {
+                s += " · 录像快门限 1/30s";
+            }
+            extraSummary.setText((video ? "录像 · " : "拍照 · ") + s);
         } else {
             extraActionBtn.setText("换场景");
-            String mark = scene.custom ? "（自定义）" : (scene.edited ? "（已调参）" : "");
-            extraSummary.setText("场景 · " + scene.name + mark + "：" + scene.hint);
+            ScenePreset sp = curScene();
+            String mark = sp.custom ? "（自定义）" : (sp.edited ? "（已调参）" : "");
+            extraSummary.setText((video ? "录像场景 · " : "拍照场景 · ")
+                    + sp.name + mark + "：" + sp.hint);
         }
     }
 
     private void onExtraAction() {
-        if (photoSub == SUB_PRO) showProDialog();
-        else showSceneDialog();
+        if (currentSub() == SUB_PRO) {
+            showProDialog();
+        } else {
+            showSceneDialog();
+        }
+    }
+
+    private CaptureParams currentParams() {
+        int sub = currentSub();
+        if (sub == SUB_PRO) {
+            return captureMode == MODE_PHOTO ? proParams : videoProParams;
+        }
+        if (sub == SUB_IDIOT) {
+            return curScene().toParams();
+        }
+        return new CaptureParams();
     }
 
     private void applyCameraParams() {
-        CaptureParams p;
-        if (captureMode != MODE_PHOTO || photoSub == SUB_NORMAL) {
-            p = new CaptureParams();
-        } else if (photoSub == SUB_PRO) {
-            p = proParams;
-        } else {
-            p = scene.toParams();
+        CaptureParams p = currentParams();
+        // 录像时手动快门最长 1/30 秒，更慢会明显掉帧；拍照不受影响。
+        if (captureMode == MODE_VIDEO && p.manualExposure && p.exposureNs > VIDEO_MAX_EXPOSURE_NS) {
+            p = p.copy();
+            p.exposureNs = VIDEO_MAX_EXPOSURE_NS;
         }
         if (cameraController != null) cameraController.setParams(p);
+    }
+
+    private ScenePreset curScene() {
+        return captureMode == MODE_PHOTO ? scene : videoScene;
+    }
+
+    private void setCurScene(ScenePreset sp) {
+        if (captureMode == MODE_PHOTO) {
+            scene = sp;
+            prefs.edit().putString("scene", sp.id).apply();
+        } else {
+            videoScene = sp;
+            prefs.edit().putString("video_scene", sp.id).apply();
+        }
     }
 
     // ------------------------------------------------------------------ 专业参数
 
     private void showProDialog() {
-        final CaptureParams p = proParams.copy();
+        final boolean video = captureMode == MODE_VIDEO;
+        final CaptureParams p = (video ? videoProParams : proParams).copy();
+        final String[] shutterLabels = video ? SHUTTER_LABELS_VIDEO : SHUTTER_LABELS;
+        final long[] shutterValues = video ? SHUTTER_VALUES_VIDEO : SHUTTER_VALUES;
         final int[] isoIdx = {isoIndexOf(p.manualExposure ? p.iso : 0)};
-        final int[] shutterIdx = {shutterIndexOf(p.manualExposure ? p.exposureNs : 0)};
+        final int[] shutterIdx = {shutterIndexOf(p.manualExposure ? p.exposureNs : 0, shutterValues)};
         final int[] evIdx = {Math.round((p.ev + 2f) / 0.1f)};
         final int[] wbIdx = {p.wbAuto ? 0 : Math.max(1, Math.min(57, (p.kelvin - 2300) / 100 + 1))};
         final int[] focusIdx = {p.focusMode == CaptureParams.FOCUS_AUTO ? 0
@@ -1069,25 +1204,34 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         box.setPadding(dp(20), dp(8), dp(20), dp(4));
 
         addSeek(box, "ISO", ISO_LABELS, isoIdx[0], v -> isoIdx[0] = v);
-        addSeek(box, "快门", SHUTTER_LABELS, shutterIdx[0], v -> shutterIdx[0] = v);
+        addSeek(box, "快门", shutterLabels, shutterIdx[0], v -> shutterIdx[0] = v);
         addSeek(box, "曝光补偿", EV_LABELS, evIdx[0], v -> evIdx[0] = v);
         addSeek(box, "白平衡", WB_LABELS, wbIdx[0], v -> wbIdx[0] = v);
         addSeek(box, "对焦", FOCUS_LABELS, focusIdx[0], v -> focusIdx[0] = v);
         addSeek(box, "手动焦距", FOCUS_DIST_LABELS, manualIdx[0], v -> manualIdx[0] = v);
 
+        if (video) {
+            TextView note = new TextView(this);
+            note.setText("录像时手动快门最长 1/30 秒，保证画面流畅、不掉帧。");
+            note.setTextColor(0xFF9AA0B2);
+            note.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+            note.setPadding(0, dp(6), 0, dp(2));
+            box.addView(note);
+        }
+
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
         scroll.addView(box);
 
         new AlertDialog.Builder(this)
-                .setTitle("专业参数")
+                .setTitle((video ? "录像" : "拍照") + " · 专业参数")
                 .setView(scroll)
                 .setPositiveButton("应用", (d, w) -> {
                     CaptureParams q = new CaptureParams();
                     q.manualExposure = isoIdx[0] > 0 || shutterIdx[0] > 0;
                     if (q.manualExposure) {
                         q.iso = isoIdx[0] > 0 ? ISO_VALUES[isoIdx[0]] : 200;
-                        q.exposureNs = shutterIdx[0] > 0 ? SHUTTER_VALUES[shutterIdx[0]]
-                                : 1_000_000_000L / 60;
+                        q.exposureNs = shutterIdx[0] > 0 ? shutterValues[shutterIdx[0]]
+                                : (video ? 1_000_000_000L / 60 : 1_000_000_000L / 125);
                     } else {
                         q.ev = -2f + evIdx[0] * 0.1f;
                     }
@@ -1098,8 +1242,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                             : focusIdx[0] == 2 ? CaptureParams.FOCUS_MACRO
                             : CaptureParams.FOCUS_MANUAL;
                     q.diopter = manualIdx[0] / 10f;
-                    proParams = q;
-                    saveProParams();
+                    if (video) {
+                        videoProParams = q;
+                        saveProParams("vpro_", q);
+                    } else {
+                        proParams = q;
+                        saveProParams("pro_", q);
+                    }
                     applyCameraParams();
                     updateExtraUi();
                 })
@@ -1157,6 +1306,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             500_000_000L, 1_000_000_000L, 2_000_000_000L};
     private static final String[] SHUTTER_LABELS = {"自动", "1/1000s", "1/500s", "1/250s",
             "1/125s", "1/60s", "1/30s", "1/15s", "1/8s", "1/4s", "1/2s", "1s", "2s"};
+    /** 录像专用：最长只到 1/30 秒，避免掉帧。 */
+    private static final long[] SHUTTER_VALUES_VIDEO = {0,
+            1_000_000_000L / 1000, 1_000_000_000L / 500, 1_000_000_000L / 250,
+            1_000_000_000L / 125, 1_000_000_000L / 60, 1_000_000_000L / 30};
+    private static final String[] SHUTTER_LABELS_VIDEO = {"自动", "1/1000s", "1/500s", "1/250s",
+            "1/125s", "1/60s", "1/30s"};
     private static final String[] EV_LABELS = buildEvLabels();
     private static final String[] FOCUS_LABELS = {"自动", "无穷远", "微距", "手动"};
     private static final String[] WB_LABELS = buildWbLabels();
@@ -1197,46 +1352,57 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         return best;
     }
 
-    private static int shutterIndexOf(long ns) {
+    private static int shutterIndexOf(long ns, long[] values) {
         if (ns <= 0) return 0;
         int best = 1;
-        for (int i = 1; i < SHUTTER_VALUES.length; i++) {
-            if (Math.abs(SHUTTER_VALUES[i] - ns) < Math.abs(SHUTTER_VALUES[best] - ns)) best = i;
+        for (int i = 1; i < values.length; i++) {
+            if (Math.abs(values[i] - ns) < Math.abs(values[best] - ns)) best = i;
         }
         return best;
     }
 
-    private void saveProParams() {
+    private static int shutterIndexOf(long ns) {
+        return shutterIndexOf(ns, SHUTTER_VALUES);
+    }
+
+    private void saveProParams(String prefix, CaptureParams p) {
         prefs.edit()
-                .putBoolean("pro_manual", proParams.manualExposure)
-                .putInt("pro_iso", proParams.iso)
-                .putLong("pro_shutter", proParams.exposureNs)
-                .putFloat("pro_ev", proParams.ev)
-                .putBoolean("pro_wb_auto", proParams.wbAuto)
-                .putInt("pro_kelvin", proParams.kelvin)
-                .putInt("pro_focus", proParams.focusMode)
-                .putFloat("pro_diopter", proParams.diopter)
+                .putBoolean(prefix + "manual", p.manualExposure)
+                .putInt(prefix + "iso", p.iso)
+                .putLong(prefix + "shutter", p.exposureNs)
+                .putFloat(prefix + "ev", p.ev)
+                .putBoolean(prefix + "wb_auto", p.wbAuto)
+                .putInt(prefix + "kelvin", p.kelvin)
+                .putInt(prefix + "focus", p.focusMode)
+                .putFloat(prefix + "diopter", p.diopter)
                 .apply();
     }
 
-    private void loadProParams() {
-        boolean first = !prefs.contains("pro_manual");
-        proParams.manualExposure = prefs.getBoolean("pro_manual", true);
-        proParams.iso = prefs.getInt("pro_iso", 200);
-        proParams.exposureNs = prefs.getLong("pro_shutter", 1_000_000_000L / 125);
-        proParams.ev = prefs.getFloat("pro_ev", 0f);
-        proParams.wbAuto = prefs.getBoolean("pro_wb_auto", true);
-        proParams.kelvin = prefs.getInt("pro_kelvin", 5200);
-        proParams.focusMode = prefs.getInt("pro_focus", CaptureParams.FOCUS_AUTO);
-        proParams.diopter = prefs.getFloat("pro_diopter", 0f);
-        if (first) {
-            proParams.manualExposure = true;
-            proParams.iso = 200;
-            proParams.exposureNs = 1_000_000_000L / 125;
-            proParams.wbAuto = false;
-            proParams.kelvin = 5200;
-            proParams.focusMode = CaptureParams.FOCUS_AUTO;
+    /**
+     * 读取专业参数。拍照首次默认手动 200 / 1/125s（和旧版一致）；
+     * 录像首次默认自动曝光 + 自动白平衡，开箱即用更稳。
+     */
+    private CaptureParams loadProParams(String prefix, boolean photoDefaults) {
+        CaptureParams p = new CaptureParams();
+        boolean first = !prefs.contains(prefix + "manual");
+        p.manualExposure = prefs.getBoolean(prefix + "manual", photoDefaults);
+        p.iso = prefs.getInt(prefix + "iso", 200);
+        p.exposureNs = prefs.getLong(prefix + "shutter",
+                photoDefaults ? 1_000_000_000L / 125 : 1_000_000_000L / 60);
+        p.ev = prefs.getFloat(prefix + "ev", 0f);
+        p.wbAuto = prefs.getBoolean(prefix + "wb_auto", !photoDefaults);
+        p.kelvin = prefs.getInt(prefix + "kelvin", 5200);
+        p.focusMode = prefs.getInt(prefix + "focus", CaptureParams.FOCUS_AUTO);
+        p.diopter = prefs.getFloat(prefix + "diopter", 0f);
+        if (first && photoDefaults) {
+            p.manualExposure = true;
+            p.iso = 200;
+            p.exposureNs = 1_000_000_000L / 125;
+            p.wbAuto = false;
+            p.kelvin = 5200;
+            p.focusMode = CaptureParams.FOCUS_AUTO;
         }
+        return p;
     }
 
     // ------------------------------------------------------------------ 傻瓜场景
@@ -1272,7 +1438,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         edit.setPadding(dp(12), dp(9), dp(12), dp(9));
         edit.setOnClickListener(v -> {
             if (sceneDialog != null) sceneDialog.dismiss();
-            showSceneEditor(scene, false);
+            showSceneEditor(curScene(), false);
         });
         LinearLayout.LayoutParams editLp = new LinearLayout.LayoutParams(0, WRAP, 1f);
         editLp.setMargins(dp(4), dp(2), dp(4), dp(6));
@@ -1289,7 +1455,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             }
             final ScenePreset sp = sceneList.get(i);
             String label = sp.name + (sp.custom ? " ·自" : (sp.edited ? " *" : ""));
-            TextView b = pill(label, sp == scene);
+            TextView b = pill(label, sp == curScene());
             b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             b.setPadding(dp(4), dp(9), dp(4), dp(9));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, WRAP, 1f);
@@ -1306,7 +1472,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
         scroll.addView(list);
         sceneDialog = new AlertDialog.Builder(this)
-                .setTitle("选择场景 · 自动匹配参数")
+                .setTitle((captureMode == MODE_VIDEO ? "录像" : "拍照") + " · 选择场景")
                 .setView(scroll)
                 .setNegativeButton("关闭", null)
                 .create();
@@ -1314,8 +1480,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void selectScene(ScenePreset sp) {
-        scene = sp;
-        prefs.edit().putString("scene", sp.id).apply();
+        setCurScene(sp);
         applyCameraParams();
         updateExtraUi();
         toast(sp.name + " · " + sp.hint);
@@ -1366,7 +1531,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         addSeek(box, "手动焦距", FOCUS_DIST_LABELS, distIdx[0], v -> distIdx[0] = v);
 
         TextView note = new TextView(this);
-        note.setText("ISO 和快门都选“自动”时按自动曝光，只叠加曝光补偿；任一手动即切到手动曝光。");
+        String noteText = "ISO 和快门都选“自动”时按自动曝光，只叠加曝光补偿；任一手动即切到手动曝光。";
+        if (captureMode == MODE_VIDEO) {
+            noteText += "\n录像会把手动快门限制在 1/30 秒以内，保证画面流畅。";
+        }
+        note.setText(noteText);
         note.setTextColor(0xFF9AA0B2);
         note.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         note.setPadding(0, dp(6), 0, dp(2));
@@ -1376,7 +1545,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         scroll.addView(box);
 
         AlertDialog.Builder builder = new AlertDialog.Builder(this)
-                .setTitle(isNew ? "新增场景" : (custom ? "编辑自定义场景" : "调整场景参数 · " + base.name))
+                .setTitle((captureMode == MODE_VIDEO ? "录像 · " : "拍照 · ")
+                        + (isNew ? "新增场景"
+                        : (custom ? "编辑自定义场景" : "调整场景参数 · " + base.name)))
                 .setView(scroll)
                 .setPositiveButton("保存", (d, w) -> {
                     String nm = nameEt.getText().toString().trim();
@@ -1418,8 +1589,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     } else {
                         sceneStore.persist();
                     }
-                    scene = target;
-                    prefs.edit().putString("scene", target.id).apply();
+                    setCurScene(target);
                     applyCameraParams();
                     updateExtraUi();
                     toast(isNew ? "已新增场景 · " + target.name : "已保存 · " + target.name);
@@ -1431,7 +1601,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         } else if (builtin) {
             builder.setNeutralButton("恢复默认", (d, w) -> {
                 sceneStore.reset(base);
-                if (scene == base) applyCameraParams();
+                if (curScene() == base) applyCameraParams();
                 updateExtraUi();
                 toast("已恢复默认参数 · " + base.name);
             });
@@ -1445,9 +1615,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 .setMessage("确定删除「" + sp.name + "」吗？")
                 .setPositiveButton("删除", (d, w) -> {
                     sceneStore.remove(sp);
-                    if (scene == sp) {
-                        scene = sceneList.isEmpty() ? ScenePreset.ALL[0].copy() : sceneList.get(0);
-                        prefs.edit().putString("scene", scene.id).apply();
+                    if (curScene() == sp) {
+                        setCurScene(sceneList.isEmpty()
+                                ? ScenePreset.ALL[0].copy() : sceneList.get(0));
                     }
                     applyCameraParams();
                     updateExtraUi();
