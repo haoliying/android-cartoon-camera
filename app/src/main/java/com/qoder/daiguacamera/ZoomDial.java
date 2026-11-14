@@ -170,9 +170,10 @@ public class ZoomDial extends View {
         if (deg < 0) deg += 360;
         float a = (float) deg;
         if (a < START_ANGLE) a += 360;
-        // 底部缺口（45°–135°）以外都算有效，落在缺口里就近吸附
+        // 底部缺口（45°–135°）以外都算有效，落在缺口里就近吸附到两端
         if (a > START_ANGLE + SWEEP_ANGLE) {
-            a = (a > START_ANGLE + SWEEP_ANGLE + 90f) ? START_ANGLE : START_ANGLE + SWEEP_ANGLE;
+            float over = a - (START_ANGLE + SWEEP_ANGLE);
+            a = over > 45f ? START_ANGLE : START_ANGLE + SWEEP_ANGLE;
         }
         setFraction((a - START_ANGLE) / SWEEP_ANGLE);
     }

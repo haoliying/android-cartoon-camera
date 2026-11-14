@@ -666,9 +666,24 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 case MotionEvent.ACTION_UP:
                     renderer.onTouch(u, vv, 2);
                     // 轻点预览：设置对焦点（拖动、捏合都不算）
-                    if (!tapMoved && !pinching && cameraController != null
-                            && cameraController.focusAt(e.getX() / w, e.getY() / h, mirror)) {
-                        showFocusRing(e.getX(), e.getY());
+                    if (!tapMoved && !pinching && cameraController != null) {
+                        float fx = e.getX() / w;
+                        float fy = e.getY() / h;
+                        // 预览按比例居中裁切填满屏幕，先把屏幕坐标还原到完整画面
+                        if (orientedW > 0 && orientedH > 0) {
+                            float viewAspect = w / (float) h;
+                            float imgAspect = orientedW / (float) orientedH;
+                            if (viewAspect < imgAspect) {
+                                float cx = viewAspect / imgAspect;
+                                fx = 0.5f + (fx - 0.5f) * cx;
+                            } else if (imgAspect < viewAspect) {
+                                float cy = imgAspect / viewAspect;
+                                fy = 0.5f + (fy - 0.5f) * cy;
+                            }
+                        }
+                        if (cameraController.focusAt(fx, fy, mirror)) {
+                            showFocusRing(e.getX(), e.getY());
+                        }
                     }
                     break;
                 case MotionEvent.ACTION_CANCEL:
