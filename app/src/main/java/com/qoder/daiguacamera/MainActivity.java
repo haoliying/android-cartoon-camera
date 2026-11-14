@@ -795,6 +795,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         });
         intRow.addView(intensityBar, new LinearLayout.LayoutParams(MATCH, WRAP));
         box.addView(intRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+        updateIntensityEnabled();
 
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
         scroll.addView(box);
