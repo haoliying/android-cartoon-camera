@@ -80,6 +80,12 @@ public class CameraController {
     private volatile boolean zoomKnown = false;
     private android.graphics.Rect activeArray;
 
+    // 点击对焦：AF/AE 测光区域
+    private volatile boolean afAutoSupported = false;
+    private volatile boolean afRegionsSupported = false;
+    private volatile boolean aeRegionsSupported = false;
+    private volatile android.hardware.camera2.params.MeteringRectangle focusRect;
+
     public CameraController(Context ctx) {
         manager = (CameraManager) ctx.getSystemService(Context.CAMERA_SERVICE);
         thread = new HandlerThread("camera2");
@@ -238,6 +244,90 @@ public class CameraController {
         handler.post(this::applyRepeating);
     }
 
+    /** 当前数码变焦对应的传感器裁切区域。 */
+    public android.graphics.Rect currentCropRect() {
+        android.graphics.Rect aa = activeArray;
+        if (aa == null) return new android.graphics.Rect(0, 0, 1, 1);
+        float z = zoom;
+        if (z <= 1.001f) return new android.graphics.Rect(aa);
+        int cw = Math.max(1, Math.round(aa.width() / z));
+        int ch = Math.max(1, Math.round(aa.height() / z));
+        int left = aa.left + (aa.width() - cw) / 2;
+        int top = aa.top + (aa.height() - ch) / 2;
+        return new android.graphics.Rect(left, top, left + cw, top + ch);
+    }
+
+    /**
+     * 点击预览设置对焦点。u/v 为显示坐标（左上角为原点，0–1）。
+     * 返回 true 表示相机接受了对焦/测光点。
+     */
+    public boolean focusAt(float u, float v, boolean mirror) {
+        if (activeArray == null) return false;
+        if (!afAutoSupported && !afRegionsSupported && !aeRegionsSupported) return false;
+
+        float nx = clamp(u, 0f, 1f);
+        float ny = clamp(v, 0f, 1f);
+        if (mirror) nx = 1f - nx;
+
+        // 显示坐标 -> 传感器坐标（竖屏锁定，按传感器方向旋转）
+        float sx;
+        float sy;
+        int rot = ((stillRotation % 360) + 360) % 360;
+        if (rot == 90) {
+            sx = ny;
+            sy = 1f - nx;
+        } else if (rot == 270) {
+            sx = 1f - ny;
+            sy = nx;
+        } else if (rot == 180) {
+            sx = 1f - nx;
+            sy = 1f - ny;
+        } else {
+            sx = nx;
+            sy = ny;
+        }
+
+        android.graphics.Rect crop = currentCropRect();
+        int px = crop.left + Math.round(sx * crop.width());
+        int py = crop.top + Math.round(sy * crop.height());
+        int size = Math.max(1, Math.round(Math.min(crop.width(), crop.height()) * 0.18f));
+        int left = Math.max(crop.left, Math.min(crop.right - size, px - size / 2));
+        int top = Math.max(crop.top, Math.min(crop.bottom - size, py - size / 2));
+        android.graphics.Rect r = new android.graphics.Rect(left, top, left + size, top + size);
+        focusRect = new android.hardware.camera2.params.MeteringRectangle(
+                r, android.hardware.camera2.params.MeteringRectangle.METERING_WEIGHT_MAX);
+        handler.post(this::triggerFocus);
+        return true;
+    }
+
+    /** 发一次 AF 触发，然后回到连续对焦；测光区域保留到下一次点击。 */
+    private void triggerFocus() {
+        if (session == null || device == null || previewSurface == null) return;
+        // 正在出图时不去打断本次拍照
+        if (jpegSink != null) return;
+        try {
+            CaptureRequest.Builder b = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            b.addTarget(previewSurface);
+            applyParams(b, false);
+            if (afAutoSupported) {
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
+                b.set(CaptureRequest.CONTROL_AF_TRIGGER,
+                        CaptureRequest.CONTROL_AF_TRIGGER_START);
+                try {
+                    session.capture(b.build(), null, handler);
+                } catch (Throwable t) {
+                    session.setRepeatingRequest(b.build(), null, handler);
+                }
+                handler.postDelayed(this::applyRepeating, 1200);
+            } else {
+                session.setRepeatingRequest(b.build(), null, handler);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "triggerFocus", t);
+            applyRepeating();
+        }
+    }
+
     private void loadCharacteristics(int facing) {
         isoRange = null;
         expRange = null;
@@ -249,6 +339,10 @@ public class CameraController {
         zoom = 1f;
         zoomKnown = false;
         activeArray = null;
+        focusRect = null;
+        afAutoSupported = false;
+        afRegionsSupported = false;
+        aeRegionsSupported = false;
         try {
             String id = findCameraId(facing);
             if (id == null) return;
@@ -260,7 +354,8 @@ public class CameraController {
             flashAvailable = flash != null && flash;
             flashKnown = true;
             Float mz = c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);
-            if (mz != null && mz > 1f) maxZoom = Math.min(10f, mz);
+            // 界面上限 100×；设备支持不到时由 setZoom 自动停在设备最大值
+            if (mz != null && mz > 1f) maxZoom = Math.min(100f, mz);
             zoomKnown = true;
             activeArray = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
             Float md = c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
@@ -276,8 +371,13 @@ public class CameraController {
             if (modes != null) {
                 for (int m : modes) {
                     if (m == CaptureRequest.CONTROL_AF_MODE_OFF) afOffSupported = true;
+                    if (m == CaptureRequest.CONTROL_AF_MODE_AUTO) afAutoSupported = true;
                 }
             }
+            Integer maxAf = c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF);
+            afRegionsSupported = maxAf != null && maxAf > 0;
+            Integer maxAe = c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE);
+            aeRegionsSupported = maxAe != null && maxAe > 0;
         } catch (Throwable t) {
             Log.w(TAG, "characteristics", t);
         }
@@ -618,6 +718,24 @@ public class CameraController {
                 b.set(CaptureRequest.CONTROL_AF_MODE,
                         CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
             } catch (Throwable ignored) {
+            }
+        }
+        // 点击对焦：把 AF/AE 的测光权重放到用户点的位置
+        android.hardware.camera2.params.MeteringRectangle mr = focusRect;
+        if (mr != null) {
+            if (afRegionsSupported) {
+                try {
+                    b.set(CaptureRequest.CONTROL_AF_REGIONS,
+                            new android.hardware.camera2.params.MeteringRectangle[]{mr});
+                } catch (Throwable ignored) {
+                }
+            }
+            if (aeRegionsSupported) {
+                try {
+                    b.set(CaptureRequest.CONTROL_AE_REGIONS,
+                            new android.hardware.camera2.params.MeteringRectangle[]{mr});
+                } catch (Throwable ignored) {
+                }
             }
         }
         applyFlashAndZoom(b, forStill);

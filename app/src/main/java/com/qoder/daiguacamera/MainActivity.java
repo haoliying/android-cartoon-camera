@@ -151,7 +151,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private TextView extraActionBtn;
     private TextView flashBtn;
     private TextView styleBtn;
-    private ZoomSlider zoomSlider;
+    private FrameLayout zoomBox;
+    private ZoomDial zoomDial;
+    private TextView zoomChip;
+    private TextView zoomCollapse;
+    private boolean zoomCollapsed;
+    private LinearLayout panelContent;
+    private TextView panelHandle;
+    private boolean panelCollapsed;
+    /** 点击预览设置对焦点时，用来判断是点击还是拖动。 */
+    private float tapDownX, tapDownY;
+    private boolean tapMoved;
+    private View focusRing;
 
     /** 是否在非正常风格下额外保存一份未加风格的原素材。 */
     private boolean saveOriginal;
@@ -370,16 +381,51 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         badgeLp.topMargin = dp(60);
         root.addView(recBadge, badgeLp);
 
-        // 右侧竖直播变焦条：看得见、拖得动，和双指捏合共用同一个变焦值
-        zoomSlider = new ZoomSlider(this);
-        zoomSlider.setListener((zoom, fromUser) -> {
+        // 右侧焦距控制盘：圆盘拖动变焦；可收起成右侧小圆钮，把画面尽量让出来
+        zoomBox = new FrameLayout(this);
+        zoomDial = new ZoomDial(this);
+        zoomDial.setRange(1f, 100f);
+        zoomDial.setListener((zoom, fromUser) -> {
             if (cameraController != null) cameraController.setZoom(zoom);
+            updateZoomChip();
         });
-        FrameLayout.LayoutParams zoomLp = new FrameLayout.LayoutParams(dp(52), dp(216));
+        zoomBox.addView(zoomDial, new FrameLayout.LayoutParams(dp(128), dp(152)));
+
+        zoomCollapse = circleButton("›", 15, 24);
+        zoomCollapse.setContentDescription("收起焦距控制盘");
+        zoomCollapse.setOnClickListener(v -> setZoomCollapsed(true));
+        FrameLayout.LayoutParams colLp = new FrameLayout.LayoutParams(dp(24), dp(24));
+        colLp.gravity = Gravity.TOP | Gravity.END;
+        colLp.topMargin = dp(2);
+        colLp.rightMargin = dp(2);
+        zoomBox.addView(zoomCollapse, colLp);
+
+        zoomChip = circleButton("1.0×", 10, 50);
+        zoomChip.setContentDescription("展开焦距控制盘");
+        zoomChip.setOnClickListener(v -> setZoomCollapsed(false));
+        FrameLayout.LayoutParams chipLp = new FrameLayout.LayoutParams(dp(50), dp(50));
+        chipLp.gravity = Gravity.TOP | Gravity.END;
+        zoomChip.setVisibility(View.GONE);
+        zoomBox.addView(zoomChip, chipLp);
+
+        FrameLayout.LayoutParams zoomLp = new FrameLayout.LayoutParams(dp(128), dp(152));
         zoomLp.gravity = Gravity.TOP | Gravity.END;
         zoomLp.topMargin = dp(64);
         zoomLp.rightMargin = dp(8);
-        root.addView(zoomSlider, zoomLp);
+        root.addView(zoomBox, zoomLp);
+
+        // 点击对焦的白色圆环
+        focusRing = new View(this);
+        GradientDrawable ringBg = new GradientDrawable();
+        ringBg.setShape(GradientDrawable.OVAL);
+        ringBg.setColor(Color.TRANSPARENT);
+        ringBg.setStroke(Math.max(1, Math.round(dp(1.6f))), 0xEEFFFFFF);
+        focusRing.setBackground(ringBg);
+        focusRing.setVisibility(View.GONE);
+        root.addView(focusRing, new FrameLayout.LayoutParams(dp(74), dp(74)));
+
+        zoomCollapsed = prefs.getBoolean("zoom_collapsed", false);
+        applyZoomCollapsed();
 
         // 底部控制面板：深色圆角卡片，只保留三层核心选择
         bottomPanel = new LinearLayout(this);
@@ -389,7 +435,33 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         panelBg.setCornerRadii(new float[]{dp(26), dp(26), dp(26), dp(26), 0, 0, 0, 0});
         panelBg.setStroke(dp(1), 0x1FFFFFFF);
         bottomPanel.setBackground(panelBg);
-        bottomPanel.setPadding(dp(16), dp(14), dp(16), dp(8));
+        bottomPanel.setPadding(dp(16), dp(10), dp(16), dp(8));
+
+        // 收起把手：点一下把整块控制区缩到底部，只留一条细把手
+        LinearLayout handleRow = new LinearLayout(this);
+        handleRow.setOrientation(LinearLayout.VERTICAL);
+        handleRow.setGravity(Gravity.CENTER_HORIZONTAL);
+        handleRow.setPadding(0, dp(2), 0, dp(2));
+        View handleBar = new View(this);
+        GradientDrawable handleBarBg = new GradientDrawable();
+        handleBarBg.setCornerRadius(dp(3));
+        handleBarBg.setColor(0x66FFFFFF);
+        handleBar.setBackground(handleBarBg);
+        handleRow.addView(handleBar, new LinearLayout.LayoutParams(dp(40), dp(4)));
+        panelHandle = new TextView(this);
+        panelHandle.setText("收起");
+        panelHandle.setTextColor(0x99FFFFFF);
+        panelHandle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f);
+        LinearLayout.LayoutParams handleTextLp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        handleTextLp.topMargin = dp(2);
+        handleRow.addView(panelHandle, handleTextLp);
+        handleRow.setOnClickListener(v -> setPanelCollapsed(!panelCollapsed));
+        bottomPanel.addView(handleRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        panelContent = new LinearLayout(this);
+        panelContent.setOrientation(LinearLayout.VERTICAL);
+        bottomPanel.addView(panelContent, new LinearLayout.LayoutParams(MATCH, WRAP));
+        panelCollapsed = prefs.getBoolean("panel_collapsed", false);
 
         // 第一层：录像 / 拍照（通栏分段控件）
         LinearLayout captureSeg = new LinearLayout(this);
@@ -409,7 +481,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         LinearLayout.LayoutParams photoSegLp = new LinearLayout.LayoutParams(0, dp(34), 1f);
         photoSegLp.leftMargin = dp(4);
         captureSeg.addView(photoPill, photoSegLp);
-        bottomPanel.addView(captureSeg, new LinearLayout.LayoutParams(MATCH, WRAP));
+        panelContent.addView(captureSeg, new LinearLayout.LayoutParams(MATCH, WRAP));
 
         // 第二层：普通 / 专业 / 傻瓜（录像和拍照共用）
         LinearLayout subRow = new LinearLayout(this);
@@ -428,7 +500,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         subIdiotPill.setOnClickListener(v -> setSub(SUB_IDIOT));
         subRow.addView(subIdiotPill, new LinearLayout.LayoutParams(0, WRAP, 1f));
 
-        bottomPanel.addView(subRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+        panelContent.addView(subRow, new LinearLayout.LayoutParams(MATCH, WRAP));
 
         // 第三层：风格 + 参数/场景入口
         extraRow = new LinearLayout(this);
@@ -459,7 +531,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         extraActionBtn.setVisibility(View.GONE);
         extraRow.addView(extraActionBtn, new LinearLayout.LayoutParams(WRAP, WRAP));
 
-        bottomPanel.addView(extraRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+        panelContent.addView(extraRow, new LinearLayout.LayoutParams(MATCH, WRAP));
 
         // 快门行：相册在左，快门居中，切换镜头在右
         LinearLayout recordRow = new LinearLayout(this);
@@ -502,7 +574,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         flipBtn.setOnClickListener(v -> flipCamera());
         recordRow.addView(flipBtn, new LinearLayout.LayoutParams(dp(46), dp(46)));
 
-        bottomPanel.addView(recordRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+        panelContent.addView(recordRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        applyPanelCollapsed();
 
         FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(MATCH, WRAP);
         panelLp.gravity = Gravity.BOTTOM;
@@ -512,14 +586,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             int top = insets.getSystemWindowInsetTop();
             int bottom = insets.getSystemWindowInsetBottom();
             topBar.setPadding(dp(16), top + dp(8), dp(16), dp(6));
-            bottomPanel.setPadding(dp(16), dp(14), dp(16), bottom + dp(10));
+            bottomPanel.setPadding(dp(16), dp(10), dp(16), bottom + dp(10));
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) recBadge.getLayoutParams();
             lp.topMargin = top + dp(56);
             recBadge.setLayoutParams(lp);
-            if (zoomSlider != null) {
-                FrameLayout.LayoutParams zlp = (FrameLayout.LayoutParams) zoomSlider.getLayoutParams();
+            if (zoomBox != null) {
+                FrameLayout.LayoutParams zlp = (FrameLayout.LayoutParams) zoomBox.getLayoutParams();
                 zlp.topMargin = top + dp(64);
-                zoomSlider.setLayoutParams(zlp);
+                zoomBox.setLayoutParams(zlp);
             }
             return insets;
         });
@@ -574,18 +648,32 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     lastTouchPost = SystemClock.elapsedRealtime();
+                    tapDownX = e.getX();
+                    tapDownY = e.getY();
+                    tapMoved = false;
                     renderer.onTouch(u, vv, 0);
                     v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
                     break;
                 case MotionEvent.ACTION_MOVE:
+                    if (Math.abs(e.getX() - tapDownX) + Math.abs(e.getY() - tapDownY) > dp(14)) {
+                        tapMoved = true;
+                    }
                     if (SystemClock.elapsedRealtime() - lastTouchPost > 40) {
                         lastTouchPost = SystemClock.elapsedRealtime();
                         renderer.onTouch(u, vv, 1);
                     }
                     break;
                 case MotionEvent.ACTION_UP:
+                    renderer.onTouch(u, vv, 2);
+                    // 轻点预览：设置对焦点（拖动、捏合都不算）
+                    if (!tapMoved && !pinching && cameraController != null
+                            && cameraController.focusAt(e.getX() / w, e.getY() / h, mirror)) {
+                        showFocusRing(e.getX(), e.getY());
+                    }
+                    break;
                 case MotionEvent.ACTION_CANCEL:
                     renderer.onTouch(u, vv, 2);
+                    tapMoved = true;
                     break;
                 default:
                     break;
@@ -677,12 +765,83 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         flashBtn.setContentDescription("闪光灯：" + label + (supported ? "" : "（不可用）"));
     }
 
-    /** 把相机当前的变焦值同步到右侧滑条（捏合、切镜头、相机就绪时调用）。 */
+    /** 把相机当前的变焦值同步到焦距控制盘（捏合、切镜头、相机就绪时调用）。 */
     private void syncZoomUi() {
-        if (zoomSlider == null || cameraController == null) return;
-        zoomSlider.setMaxZoom(cameraController.maxZoom());
-        zoomSlider.setZoom(cameraController.getZoom());
+        if (zoomDial == null || cameraController == null) return;
+        float max = Math.min(100f, Math.max(1f, cameraController.maxZoom()));
+        zoomDial.setRange(1f, max);
+        zoomDial.setZoom(cameraController.getZoom());
+        updateZoomChip();
     }
+
+    private void updateZoomChip() {
+        if (zoomChip == null || zoomDial == null) return;
+        float z = zoomDial.getZoom();
+        if (cameraController != null) z = cameraController.getZoom();
+        zoomChip.setText(String.format(Locale.US, "%.1f×", z));
+    }
+
+    private void setZoomCollapsed(boolean collapsed) {
+        zoomCollapsed = collapsed;
+        prefs.edit().putBoolean("zoom_collapsed", collapsed).apply();
+        applyZoomCollapsed();
+    }
+
+    private void applyZoomCollapsed() {
+        if (zoomDial == null || zoomBox == null) return;
+        zoomDial.setVisibility(zoomCollapsed ? View.GONE : View.VISIBLE);
+        zoomCollapse.setVisibility(zoomCollapsed ? View.GONE : View.VISIBLE);
+        zoomChip.setVisibility(zoomCollapsed ? View.VISIBLE : View.GONE);
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) zoomBox.getLayoutParams();
+        if (lp != null) {
+            lp.width = dp(zoomCollapsed ? 50 : 128);
+            lp.height = dp(zoomCollapsed ? 50 : 152);
+            zoomBox.setLayoutParams(lp);
+        }
+        updateZoomChip();
+    }
+
+    private void setPanelCollapsed(boolean collapsed) {
+        panelCollapsed = collapsed;
+        prefs.edit().putBoolean("panel_collapsed", collapsed).apply();
+        applyPanelCollapsed();
+    }
+
+    private void applyPanelCollapsed() {
+        if (panelContent == null) return;
+        panelContent.setVisibility(panelCollapsed ? View.GONE : View.VISIBLE);
+        if (panelHandle != null) {
+            panelHandle.setText(panelCollapsed ? "展开" : "收起");
+        }
+    }
+
+    /** 轻点预览后显示对焦圈，短暂停留再淡出。 */
+    private void showFocusRing(float x, float y) {
+        if (focusRing == null) return;
+        ui.removeCallbacks(hideFocusRunnable);
+        int size = dp(74);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(size, size);
+        lp.gravity = Gravity.TOP | Gravity.START;
+        lp.leftMargin = Math.round(x - size / 2f);
+        lp.topMargin = Math.round(y - size / 2f);
+        focusRing.setLayoutParams(lp);
+        focusRing.animate().cancel();
+        focusRing.setAlpha(1f);
+        focusRing.setScaleX(1.45f);
+        focusRing.setScaleY(1.45f);
+        focusRing.setVisibility(View.VISIBLE);
+        focusRing.animate().scaleX(1f).scaleY(1f).setDuration(180).start();
+        ui.postDelayed(hideFocusRunnable, 1500);
+    }
+
+    private final Runnable hideFocusRunnable = () -> {
+        if (focusRing == null) return;
+        focusRing.animate().alpha(0f).setDuration(220).withEndAction(() -> {
+            if (focusRing != null && focusRing.getAlpha() < 0.05f) {
+                focusRing.setVisibility(View.GONE);
+            }
+        }).start();
+    };
 
     private final SensorEventListener motionListener = new SensorEventListener() {
         @Override
