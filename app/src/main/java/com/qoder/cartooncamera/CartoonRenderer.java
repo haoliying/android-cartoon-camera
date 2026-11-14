@@ -773,10 +773,10 @@ public class CartoonRenderer {
 
         for (SpriteSystem.Sprite s : sprites.sprites) {
             if (s == null || s.fade <= 0.01f) continue;
-            float halfY = s.size * s.fade;
+            float halfY = s.size * s.fade * s.scale;
             float halfX = halfY * k;
             float cu = mirror ? 1f - s.u : s.u;
-            hueColor(s.hue, 0.60f, 1f, tint);
+            hueColor(s.hue, s.sat, 1f, tint);
             GLES20.glUniform2f(p.u("uCenter"), cu * 2f - 1f, s.v * 2f - 1f);
             GLES20.glUniform2f(p.u("uHalf"), halfX, halfY);
             GLES20.glUniform1f(p.u("uRot"), s.rot);
@@ -788,6 +788,9 @@ public class CartoonRenderer {
             GLES20.glUniform2f(p.u("uSquash"), Math.max(0.05f, s.squashX),
                     Math.max(0.05f, s.squashY));
             GLES20.glUniform2f(p.u("uLook"), s.lookX, s.lookY);
+            GLES20.glUniform1f(p.u("uSpecies"), s.species);
+            GLES20.glUniform1f(p.u("uTemper"), s.temper);
+            GLES20.glUniform1f(p.u("uBounce"), s.bounce);
             float halfPix = Math.max(3f, halfY * vh * 0.5f);
             GLES20.glUniform1f(p.u("uAA"), 1.7f / halfPix);
             GLES20.glUniform1f(p.u("uAlpha"), 1f);
@@ -832,6 +835,9 @@ public class CartoonRenderer {
             GLES20.glUniform1f(p.u("uSeed"), 0f);
             GLES20.glUniform2f(p.u("uSquash"), 1f, 1f);
             GLES20.glUniform2f(p.u("uLook"), 0f, 0f);
+            GLES20.glUniform1f(p.u("uSpecies"), 0f);
+            GLES20.glUniform1f(p.u("uTemper"), 0f);
+            GLES20.glUniform1f(p.u("uBounce"), 1f);
             float halfPix = Math.max(3f, halfY * vh * 0.5f);
             GLES20.glUniform1f(p.u("uAA"), 1.7f / halfPix);
             GLES20.glUniform1f(p.u("uAlpha"), Math.max(0f, alpha));
