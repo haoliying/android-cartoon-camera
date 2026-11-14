@@ -89,7 +89,7 @@ public class CartoonRenderer {
     private int contentFbo, contentTex, contentTick;
     private ByteBuffer contentBuf;
     private final byte[] contentBytes = new byte[SpriteSystem.GRID * SpriteSystem.GRID * 4];
-    private volatile boolean spritesEnabled = true;
+    private volatile boolean spritesEnabled = false;
     private volatile float motYaw, motPitch, motRoll, motSpeed;
     private long animStartNs;
     private float animTime, lastAnimT;

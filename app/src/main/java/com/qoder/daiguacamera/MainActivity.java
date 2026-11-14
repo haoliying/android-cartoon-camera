@@ -88,7 +88,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private SharedPreferences prefs;
 
     // 小精灵
-    private boolean spritesOn = true;
+    private boolean spritesOn = false;
     private TextView spriteBtn;
     private SensorManager sensorManager;
     private Sensor gyro;
@@ -169,7 +169,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         prefs = getSharedPreferences("cartoon", MODE_PRIVATE);
         intensity = prefs.getFloat("intensity", 0.95f);
         style = StylePreset.byId(prefs.getString("style", "normal"));
-        spritesOn = prefs.getBoolean("sprites", true);
+        // v1.9 起小精灵默认关闭；升级用户也执行一次，之后尊重用户自己的开关
+        if (!prefs.getBoolean("sprites_v19", false)) {
+            prefs.edit().putBoolean("sprites", false).putBoolean("sprites_v19", true).apply();
+        }
+        spritesOn = prefs.getBoolean("sprites", false);
         captureMode = prefs.getInt("captureMode", MODE_VIDEO);
         photoSub = prefs.getInt("photoSub", SUB_NORMAL);
         loadProParams();
