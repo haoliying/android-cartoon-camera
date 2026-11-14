@@ -12,6 +12,10 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.hardware.camera2.CameraCharacteristics;
 import android.media.MediaRecorder;
 import android.media.MediaScannerConnection;
@@ -29,6 +33,7 @@ import android.util.Log;
 import android.util.Size;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -73,6 +78,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private float intensity = 0.95f;
     private SharedPreferences prefs;
 
+    // 小精灵
+    private boolean spritesOn = true;
+    private TextView spriteBtn;
+    private SensorManager sensorManager;
+    private Sensor gyro;
+    private long lastMotionPost;
+    private long lastTouchPost;
+
     private LinearLayout topBar;
     private LinearLayout bottomPanel;
     private LinearLayout recBadge;
@@ -115,10 +128,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         prefs = getSharedPreferences("cartoon", MODE_PRIVATE);
         intensity = prefs.getFloat("intensity", 0.95f);
         style = StylePreset.byId(prefs.getString("style", "cartoon"));
+        spritesOn = prefs.getBoolean("sprites", true);
 
         renderer = new CartoonRenderer();
         renderer.setErrorListener(msg -> ui.post(() -> toast(msg)));
         renderer.setStyle(style, intensity);
+        renderer.setSpritesEnabled(spritesOn);
         cameraController = new CameraController(this);
 
         buildUi();
@@ -131,11 +146,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     protected void onResume() {
         super.onResume();
         maybeStartCamera();
+        registerMotion();
     }
 
     @Override
     protected void onPause() {
         super.onPause();
+        unregisterMotion();
         if (recording || recorderStarted) {
             stopRecording();
         }
@@ -187,6 +204,23 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setShadowLayer(dp(5), 0, dp(2), 0xAA000000);
         topBar.addView(title, new LinearLayout.LayoutParams(0, WRAP, 1f));
+
+        spriteBtn = new TextView(this);
+        spriteBtn.setText("✦");
+        spriteBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        spriteBtn.setTextColor(0xFFFFFFFF);
+        spriteBtn.setGravity(Gravity.CENTER);
+        GradientDrawable spriteBg = new GradientDrawable();
+        spriteBg.setShape(GradientDrawable.OVAL);
+        spriteBg.setColor(0x40000000);
+        spriteBg.setStroke(dp(1), 0x33FFFFFF);
+        spriteBtn.setBackground(spriteBg);
+        spriteBtn.setAlpha(spritesOn ? 1f : 0.38f);
+        spriteBtn.setContentDescription("小精灵开关");
+        spriteBtn.setOnClickListener(v -> toggleSprites());
+        LinearLayout.LayoutParams spriteLp = new LinearLayout.LayoutParams(dp(42), dp(42));
+        spriteLp.rightMargin = dp(8);
+        topBar.addView(spriteBtn, spriteLp);
 
         flipBtn = new TextView(this);
         flipBtn.setText("⇄");
@@ -365,8 +399,84 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             return insets;
         });
 
+        // 触摸：给小精灵和周围卡通景物加反应（按钮区域会先消费事件）
+        root.setOnTouchListener((v, e) -> {
+            float w = v.getWidth();
+            float h = v.getHeight();
+            if (w <= 0 || h <= 0) return false;
+            float u = e.getX() / w;
+            float vv = 1f - e.getY() / h;
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    lastTouchPost = SystemClock.elapsedRealtime();
+                    renderer.onTouch(u, vv, 0);
+                    v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    if (SystemClock.elapsedRealtime() - lastTouchPost > 40) {
+                        lastTouchPost = SystemClock.elapsedRealtime();
+                        renderer.onTouch(u, vv, 1);
+                    }
+                    break;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    renderer.onTouch(u, vv, 2);
+                    break;
+                default:
+                    break;
+            }
+            return true;
+        });
+
         setContentView(root);
     }
+
+    private void registerMotion() {
+        if (gyro != null) return;
+        if (sensorManager == null) {
+            sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+        }
+        if (sensorManager == null) return;
+        gyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+        if (gyro != null) {
+            sensorManager.registerListener(motionListener, gyro, SensorManager.SENSOR_DELAY_GAME);
+        }
+    }
+
+    private void unregisterMotion() {
+        if (sensorManager != null && gyro != null) {
+            sensorManager.unregisterListener(motionListener);
+        }
+    }
+
+    private void toggleSprites() {
+        spritesOn = !spritesOn;
+        prefs.edit().putBoolean("sprites", spritesOn).apply();
+        renderer.setSpritesEnabled(spritesOn);
+        if (spriteBtn != null) {
+            spriteBtn.animate().alpha(spritesOn ? 1f : 0.38f).setDuration(150).start();
+        }
+        toast(spritesOn ? "小精灵：开" : "小精灵：关");
+    }
+
+    private final SensorEventListener motionListener = new SensorEventListener() {
+        @Override
+        public void onSensorChanged(SensorEvent e) {
+            long now = SystemClock.elapsedRealtime();
+            if (now - lastMotionPost < 16) return;
+            lastMotionPost = now;
+            float gx = e.values[0];
+            float gy = e.values[1];
+            float gz = e.values[2];
+            float speed = (float) Math.sqrt(gx * gx + gy * gy + gz * gz);
+            // 竖屏下：y 轴为左右转动，x 轴为俯仰，z 轴为滚转
+            renderer.setMotion(gy, gx, gz, speed);
+        }
+
+        @Override
+        public void onAccuracyChanged(Sensor sensor, int accuracy) {
+        }
+    };
 
     private GradientDrawable chipBg(boolean active) {
         GradientDrawable d = new GradientDrawable();

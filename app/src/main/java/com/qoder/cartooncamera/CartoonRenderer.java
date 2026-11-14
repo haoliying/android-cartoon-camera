@@ -65,8 +65,19 @@ public class CartoonRenderer {
 
     private int fboA, fboB, texA, texB, fboW, fboH, halfW, halfH;
     private int quadBuf;
-    private Program progDown, progBlur, progFinal;
+    private Program progDown, progBlur, progFinal, progSprite, progCopy;
     private boolean frameScheduled;
+
+    // 小精灵：内容缩略图 + 状态机 + 传感器运动
+    private final SpriteSystem sprites = new SpriteSystem();
+    private int contentFbo, contentTex, contentTick;
+    private ByteBuffer contentBuf;
+    private final byte[] contentBytes = new byte[SpriteSystem.GRID * SpriteSystem.GRID * 4];
+    private volatile boolean spritesEnabled = true;
+    private volatile float motYaw, motPitch, motRoll, motSpeed;
+    private long animStartNs;
+    private float animTime, lastAnimT;
+    private float cropX = 1f, cropY = 1f;
 
     private final float[] texMatrix = new float[16];
     private volatile StylePreset style = StylePreset.ALL[0];
@@ -86,6 +97,34 @@ public class CartoonRenderer {
 
     public void setMirror(boolean mirror) {
         this.mirror = mirror;
+    }
+
+    /** 开关小精灵；关闭时清空现有精灵。 */
+    public void setSpritesEnabled(boolean on) {
+        spritesEnabled = on;
+        post(() -> {
+            if (!on) sprites.clear();
+        });
+    }
+
+    /** 由传感器推送的角速度（弧度/秒）：yaw 左右、pitch 上下、roll 旋转。 */
+    public void setMotion(float yaw, float pitch, float roll, float speed) {
+        motYaw = yaw;
+        motPitch = pitch;
+        motRoll = roll;
+        motSpeed = speed;
+    }
+
+    /** 触摸：u,v 为屏幕比例坐标（v 向上），action 0 按下 1 移动 2 抬起。 */
+    public void onTouch(float u, float v, int action) {
+        final float uu = mirror ? 1f - u : u;
+        final boolean on = spritesEnabled;
+        post(() -> {
+            float aspect = (previewW > 0 && previewH > 0)
+                    ? previewW / (float) previewH : 0.5f;
+            sprites.touch(uu, v, action, aspect);
+            if (!on) sprites.clear();
+        });
     }
 
     // ------------------------------------------------------------------ lifecycle
@@ -291,6 +330,7 @@ public class CartoonRenderer {
 
         quadBuf = createQuadBuffer();
         if (!buildPrograms()) return false;
+        createContentTarget();
 
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         GLES20.glDisable(GLES20.GL_BLEND);
@@ -469,10 +509,15 @@ public class CartoonRenderer {
             if (progDown != null) progDown.delete();
             if (progBlur != null) progBlur.delete();
             if (progFinal != null) progFinal.delete();
+            if (progSprite != null) progSprite.delete();
+            if (progCopy != null) progCopy.delete();
         }
         progDown = null;
         progBlur = null;
         progFinal = null;
+        progSprite = null;
+        progCopy = null;
+        deleteContentTarget();
         destroyEglInternal();
     }
 
@@ -488,6 +533,7 @@ public class CartoonRenderer {
         } catch (Throwable t) {
             return;
         }
+        updateSprites();
         updateBlurPasses();
         if (previewSurface != EGL14.EGL_NO_SURFACE && previewW > 0 && previewH > 0) {
             blit(previewSurface, previewW, previewH);
@@ -538,6 +584,7 @@ public class CartoonRenderer {
         GLES20.glUniform2f(pb.u("uDir"), 0f, 1f);
         drawQuad(pb);
 
+        readContentGrid();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
     }
 
@@ -557,15 +604,17 @@ public class CartoonRenderer {
 
         float targetAspect = vw / (float) vh;
         float sourceAspect = fboW / (float) fboH;
-        float cropX = 1f, cropY = 1f;
+        float cx = 1f, cy = 1f;
         if (targetAspect < sourceAspect) {
-            cropX = targetAspect / sourceAspect;
+            cx = targetAspect / sourceAspect;
         } else {
-            cropY = sourceAspect / targetAspect;
+            cy = sourceAspect / targetAspect;
         }
+        cropX = cx;
+        cropY = cy;
         float snap = st.pixel > 1f ? (st.pixel / fboW) : 0f;
 
-        GLES20.glUniform2f(p.u("uCrop"), cropX, cropY);
+        GLES20.glUniform2f(p.u("uCrop"), cx, cy);
         GLES20.glUniform1f(p.u("uMirror"), mirror ? 1f : 0f);
         GLES20.glUniform1f(p.u("uSnap"), snap);
         GLES20.glUniformMatrix4fv(p.u("uTexMatrix"), 1, false, texMatrix, 0);
@@ -585,10 +634,211 @@ public class CartoonRenderer {
         GLES20.glUniform1f(p.u("uBright"), st.bright);
         GLES20.glUniform1f(p.u("uSketch"), st.sketch);
         GLES20.glUniform1f(p.u("uIntensity"), intensity);
-        GLES20.glUniform1f(p.u("uTime"), (System.nanoTime() % 1000000000L) / 1000000000f);
+        GLES20.glUniform1f(p.u("uTime"), animTime);
+        GLES20.glUniform1f(p.u("uAspect"), targetAspect);
+        GLES20.glUniform4f(p.u("uRip0"), sprites.ripU[0], sprites.ripV[0],
+                sprites.ripAge[0], sprites.ripOn[0] ? 1f : 0f);
+        GLES20.glUniform4f(p.u("uRip1"), sprites.ripU[1], sprites.ripV[1],
+                sprites.ripAge[1], sprites.ripOn[1] ? 1f : 0f);
         drawQuad(p);
 
+        drawSprites(vw, vh);
+
         EGL14.eglSwapBuffers(eglDisplay, target);
+    }
+
+    // ------------------------------------------------------------------ sprites
+
+    /** 16x16 缩略图，用来判断画面哪块“平整”，供小精灵选址。 */
+    private void createContentTarget() {
+        if (contentFbo != 0) return;
+        int[] t = new int[1];
+        GLES20.glGenTextures(1, t, 0);
+        contentTex = t[0];
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, contentTex);
+        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                SpriteSystem.GRID, SpriteSystem.GRID, 0,
+                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        int[] f = new int[1];
+        GLES20.glGenFramebuffers(1, f, 0);
+        contentFbo = f[0];
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, contentFbo);
+        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                GLES20.GL_TEXTURE_2D, contentTex, 0);
+        if (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            contentFbo = 0;
+            Log.w(TAG, "content fbo incomplete");
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        contentBuf = ByteBuffer.allocateDirect(contentBytes.length).order(ByteOrder.nativeOrder());
+    }
+
+    private void deleteContentTarget() {
+        if (contentFbo != 0) {
+            GLES20.glDeleteFramebuffers(1, new int[]{contentFbo}, 0);
+            contentFbo = 0;
+        }
+        if (contentTex != 0) {
+            GLES20.glDeleteTextures(1, new int[]{contentTex}, 0);
+            contentTex = 0;
+        }
+        contentBuf = null;
+    }
+
+    /** 每 10 帧回读一次 16x16，开销很小。 */
+    private void readContentGrid() {
+        if (contentFbo == 0 || progCopy == null || texA == 0) return;
+        if ((contentTick++ % 10) != 0) return;
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, contentFbo);
+        GLES20.glViewport(0, 0, SpriteSystem.GRID, SpriteSystem.GRID);
+        Program p = progCopy;
+        GLES20.glUseProgram(p.id);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texA);
+        GLES20.glUniform1i(p.u("uTex"), 0);
+        drawQuad(p);
+        GLES20.glReadPixels(0, 0, SpriteSystem.GRID, SpriteSystem.GRID,
+                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, contentBuf);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        contentBuf.position(0);
+        contentBuf.get(contentBytes);
+        contentBuf.position(0);
+        sprites.setContent(contentBytes, SpriteSystem.GRID, SpriteSystem.GRID, cropX, cropY);
+    }
+
+    private void updateSprites() {
+        long now = System.nanoTime();
+        if (animStartNs == 0) {
+            animStartNs = now;
+            lastAnimT = 0f;
+            animTime = 0f;
+            return;
+        }
+        animTime = (now - animStartNs) / 1e9f;
+        float dt = lastAnimT == 0f ? 0.016f : animTime - lastAnimT;
+        lastAnimT = animTime;
+        if (dt < 0f) dt = 0f;
+        if (dt > 0.1f) dt = 0.1f;
+        if (spritesEnabled) {
+            sprites.update(dt, animTime, motYaw, motPitch, motRoll, motSpeed);
+        } else {
+            sprites.update(dt, animTime, 0f, 0f, 0f, 0f);
+        }
+    }
+
+    private final float[] tint = new float[3];
+
+    private static void hueColor(float h, float s, float v, float[] out) {
+        h = h - (float) Math.floor(h);
+        float i = (float) Math.floor(h * 6f);
+        float f = h * 6f - i;
+        float p = v * (1f - s);
+        float q = v * (1f - f * s);
+        float t = v * (1f - (1f - f) * s);
+        switch ((int) i % 6) {
+            case 0: out[0] = v; out[1] = t; out[2] = p; break;
+            case 1: out[0] = q; out[1] = v; out[2] = p; break;
+            case 2: out[0] = p; out[1] = v; out[2] = t; break;
+            case 3: out[0] = p; out[1] = q; out[2] = v; break;
+            case 4: out[0] = t; out[1] = p; out[2] = v; break;
+            default: out[0] = v; out[1] = p; out[2] = q; break;
+        }
+    }
+
+    private void drawSprites(int vw, int vh) {
+        if (!spritesEnabled || progSprite == null || vw <= 0 || vh <= 0) return;
+        boolean any = false;
+        for (SpriteSystem.Sprite s : sprites.sprites) {
+            if (s != null && s.fade > 0.01f) { any = true; break; }
+        }
+        if (!any) {
+            for (SpriteSystem.Particle q : sprites.particles) {
+                if (q != null) { any = true; break; }
+            }
+        }
+        if (!any) return;
+
+        Program p = progSprite;
+        float k = vh / (float) vw;
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glUseProgram(p.id);
+        GLES20.glUniform1f(p.u("uMirror"), mirror ? 1f : 0f);
+        GLES20.glUniform1f(p.u("uTime"), animTime);
+
+        for (SpriteSystem.Sprite s : sprites.sprites) {
+            if (s == null || s.fade <= 0.01f) continue;
+            float halfY = s.size * s.fade;
+            float halfX = halfY * k;
+            float cu = mirror ? 1f - s.u : s.u;
+            hueColor(s.hue, 0.60f, 1f, tint);
+            GLES20.glUniform2f(p.u("uCenter"), cu * 2f - 1f, s.v * 2f - 1f);
+            GLES20.glUniform2f(p.u("uHalf"), halfX, halfY);
+            GLES20.glUniform1f(p.u("uRot"), s.rot);
+            GLES20.glUniform1f(p.u("uShape"), 0f);
+            GLES20.glUniform3f(p.u("uTint"), tint[0], tint[1], tint[2]);
+            GLES20.glUniform1f(p.u("uMood"), s.mood);
+            GLES20.glUniform1f(p.u("uBlink"), s.blink);
+            GLES20.glUniform1f(p.u("uSeed"), s.seed);
+            GLES20.glUniform2f(p.u("uSquash"), Math.max(0.05f, s.squashX),
+                    Math.max(0.05f, s.squashY));
+            GLES20.glUniform2f(p.u("uLook"), s.lookX, s.lookY);
+            float halfPix = Math.max(3f, halfY * vh * 0.5f);
+            GLES20.glUniform1f(p.u("uAA"), 1.7f / halfPix);
+            GLES20.glUniform1f(p.u("uAlpha"), 1f);
+            drawQuad(p);
+        }
+
+        for (SpriteSystem.Particle q : sprites.particles) {
+            if (q == null || !q.alive) continue;
+            float t = q.ttl > 0f ? Math.min(1f, q.age / q.ttl) : 1f;
+            float alpha = (1f - t) * Math.min(1f, q.age / 0.1f);
+            float grow = 1f;
+            int shape = q.shape;
+            switch (shape) {
+                case 1:
+                    hueColor(0.96f, 0.72f, 1f, tint);
+                    grow = 0.85f + 0.3f * t;
+                    break;
+                case 2:
+                    hueColor(0.13f, 0.85f, 1f, tint);
+                    grow = 0.85f + 0.4f * t;
+                    break;
+                case 3:
+                    tint[0] = 1f; tint[1] = 0.94f; tint[2] = 0.75f;
+                    grow = 1f + 2.2f * t;
+                    break;
+                default:
+                    tint[0] = 0.94f; tint[1] = 0.94f; tint[2] = 0.9f;
+                    grow = 1f + 1.6f * t;
+                    alpha *= 0.7f;
+                    break;
+            }
+            float halfY = q.size * grow;
+            float halfX = halfY * k;
+            float cu = mirror ? 1f - q.u : q.u;
+            GLES20.glUniform2f(p.u("uCenter"), cu * 2f - 1f, q.v * 2f - 1f);
+            GLES20.glUniform2f(p.u("uHalf"), halfX, halfY);
+            GLES20.glUniform1f(p.u("uRot"), q.rot);
+            GLES20.glUniform1f(p.u("uShape"), (float) shape);
+            GLES20.glUniform3f(p.u("uTint"), tint[0], tint[1], tint[2]);
+            GLES20.glUniform1f(p.u("uMood"), 0f);
+            GLES20.glUniform1f(p.u("uBlink"), 0f);
+            GLES20.glUniform1f(p.u("uSeed"), 0f);
+            GLES20.glUniform2f(p.u("uSquash"), 1f, 1f);
+            GLES20.glUniform2f(p.u("uLook"), 0f, 0f);
+            float halfPix = Math.max(3f, halfY * vh * 0.5f);
+            GLES20.glUniform1f(p.u("uAA"), 1.7f / halfPix);
+            GLES20.glUniform1f(p.u("uAlpha"), Math.max(0f, alpha));
+            drawQuad(p);
+        }
+
+        GLES20.glDisable(GLES20.GL_BLEND);
     }
 
     // ------------------------------------------------------------------ GL helpers
@@ -623,6 +873,8 @@ public class CartoonRenderer {
             progDown = new Program(VS_CAMERA, FS_DOWN);
             progBlur = new Program(VS_PLAIN, FS_BLUR);
             progFinal = new Program(VS_FINAL, FS_FINAL);
+            progSprite = new Program(SpriteShaders.VS_SPRITE, SpriteShaders.FS_SPRITE);
+            progCopy = new Program(VS_PLAIN, SpriteShaders.FS_COPY);
             return true;
         } catch (Throwable t) {
             notifyError("滤镜着色器编译失败：" + t.getMessage());
@@ -691,7 +943,7 @@ public class CartoonRenderer {
 
     private static final String VS_CAMERA = glsl(
             "attribute vec2 aPos;",
-            "uniform mat4 uTexMatrix;",
+            "uniform mediump mat4 uTexMatrix;",
             "varying vec2 vUv;",
             "void main() {",
             "  vUv = (uTexMatrix * vec4(aPos, 0.0, 1.0)).xy;",
@@ -710,8 +962,8 @@ public class CartoonRenderer {
 
     private static final String VS_FINAL = glsl(
             "attribute vec2 aPos;",
-            "uniform vec2 uCrop;",
-            "uniform float uMirror;",
+            "uniform mediump vec2 uCrop;",
+            "uniform mediump float uMirror;",
             "varying vec2 vUv;",
             "void main() {",
             "  vec2 o = (aPos - 0.5) * uCrop + 0.5;",
@@ -795,11 +1047,34 @@ public class CartoonRenderer {
             "uniform float uSketch;",
             "uniform float uIntensity;",
             "uniform float uTime;",
+            "uniform vec2 uCrop;",
+            "uniform float uMirror;",
+            "uniform float uAspect;",
+            "uniform vec4 uRip0;",
+            "uniform vec4 uRip1;",
             "float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }",
             "float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }",
+            // 触摸涟漪：以触摸点为中心扩散的水波，把画面轻轻推开并提亮波前
+            "vec2 rippleUv(vec2 s, vec4 r, out float wave) {",
+            "  wave = 0.0;",
+            "  if (r.w < 0.5) { return s; }",
+            "  vec2 rc = (r.xy - 0.5) * uCrop + 0.5;",
+            "  if (uMirror > 0.5) { rc.x = 1.0 - rc.x; }",
+            "  vec2 d = (s - rc) / uCrop * vec2(uAspect, 1.0);",
+            "  float t = (length(d) - r.z * 0.72) * 4.2;",
+            "  float band = exp(-t * t);",
+            "  float life = clamp(1.0 - r.z / 1.15, 0.0, 1.0);",
+            "  wave = band * life;",
+            "  return s + normalize(d + vec2(0.0001)) * band * life * 0.018 * uCrop;",
+            "}",
             "void main() {",
             "  vec2 uv = vUv;",
             "  if (uSnap > 0.0) { uv = (floor(uv / uSnap) + 0.5) * uSnap; }",
+            "  float w0 = 0.0;",
+            "  float w1 = 0.0;",
+            "  uv = rippleUv(uv, uRip0, w0);",
+            "  uv = rippleUv(uv, uRip1, w1);",
+            "  float wave = w0 + w1;",
             "  vec3 orig = texture2D(uVideo, (uTexMatrix * vec4(uv, 0.0, 1.0)).xy).rgb;",
             "  vec3 soft = texture2D(uBlur, uv).rgb;",
             "  vec3 base = mix(soft, orig, uDetail);",
@@ -851,7 +1126,9 @@ public class CartoonRenderer {
             "    float n = hash(uv / uTexel + floor(uTime * 12.0));",
             "    base += (n - 0.5) * uGrain * 0.5;",
             "  }",
-            "  gl_FragColor = vec4(mix(orig, clamp(base, 0.0, 1.0), uIntensity), 1.0);",
+            "  vec3 outc = mix(orig, clamp(base, 0.0, 1.0), uIntensity);",
+            "  outc += vec3(1.0, 0.94, 0.72) * wave * 0.35;",
+            "  gl_FragColor = vec4(clamp(outc, 0.0, 1.0), 1.0);",
             "}"
     );
 }
