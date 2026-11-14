@@ -70,7 +70,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private int orientedW = 720, orientedH = 1280;
 
     private StylePreset style = StylePreset.ALL[0];
-    private float intensity = 0.85f;
+    private float intensity = 0.95f;
     private SharedPreferences prefs;
 
     private LinearLayout topBar;
@@ -113,7 +113,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                         | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
 
         prefs = getSharedPreferences("cartoon", MODE_PRIVATE);
-        intensity = prefs.getFloat("intensity", 0.85f);
+        intensity = prefs.getFloat("intensity", 0.95f);
         style = StylePreset.byId(prefs.getString("style", "cartoon"));
 
         renderer = new CartoonRenderer();

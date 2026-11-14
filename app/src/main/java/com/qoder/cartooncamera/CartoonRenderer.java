@@ -63,14 +63,14 @@ public class CartoonRenderer {
     private SurfaceTexture cameraTexture;
     private Surface cameraSurface;
 
-    private int fboA, fboB, texA, texB, fboW, fboH;
+    private int fboA, fboB, texA, texB, fboW, fboH, halfW, halfH;
     private int quadBuf;
-    private Program progBlurOes, progBlurTex, progFinal;
+    private Program progDown, progBlur, progFinal;
     private boolean frameScheduled;
 
     private final float[] texMatrix = new float[16];
     private volatile StylePreset style = StylePreset.ALL[0];
-    private volatile float intensity = 0.85f;
+    private volatile float intensity = 0.95f;
     private volatile boolean mirror = false;
 
     private final Runnable frameRunnable = this::renderFrame;
@@ -294,6 +294,8 @@ public class CartoonRenderer {
 
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         GLES20.glDisable(GLES20.GL_BLEND);
+        // 关闭抖动：8 位中间缓冲的抖动噪点会被描边放大成横纹
+        GLES20.glDisable(GLES20.GL_DITHER);
         GLES20.glClearColor(0.03f, 0.03f, 0.05f, 1f);
         return true;
     }
@@ -363,13 +365,15 @@ public class CartoonRenderer {
         deleteFbos();
         fboW = w;
         fboH = h;
+        halfW = Math.max(2, w / 2);
+        halfH = Math.max(2, h / 2);
         int[] tex = new int[2];
         GLES20.glGenTextures(2, tex, 0);
         texA = tex[0];
         texB = tex[1];
         for (int id : tex) {
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id);
-            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0,
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, halfW, halfH, 0,
                     GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
@@ -408,6 +412,8 @@ public class CartoonRenderer {
         }
         fboW = 0;
         fboH = 0;
+        halfW = 0;
+        halfH = 0;
     }
 
     private void destroyPreviewInternal() {
@@ -460,12 +466,12 @@ public class CartoonRenderer {
             quadBuf = 0;
         }
         if (eglContext != EGL14.EGL_NO_CONTEXT) {
-            if (progBlurOes != null) progBlurOes.delete();
-            if (progBlurTex != null) progBlurTex.delete();
+            if (progDown != null) progDown.delete();
+            if (progBlur != null) progBlur.delete();
             if (progFinal != null) progFinal.delete();
         }
-        progBlurOes = null;
-        progBlurTex = null;
+        progDown = null;
+        progBlur = null;
         progFinal = null;
         destroyEglInternal();
     }
@@ -495,32 +501,42 @@ public class CartoonRenderer {
         if (fboA == 0 || fboB == 0 || cameraTextureId == 0) return;
         StylePreset st = style;
 
+        // 1) 相机纹理 -> 半分辨率（同时做 2x2 盒式降采样，为后续大半径平滑提供基础）
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboA);
-        GLES20.glViewport(0, 0, fboW, fboH);
-        Program p1 = progBlurOes;
-        GLES20.glUseProgram(p1.id);
+        GLES20.glViewport(0, 0, halfW, halfH);
+        Program pd = progDown;
+        GLES20.glUseProgram(pd.id);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTextureId);
-        GLES20.glUniform1i(p1.u("uTex"), 0);
-        GLES20.glUniform2f(p1.u("uTexel"), 1f / fboW, 1f / fboH);
-        GLES20.glUniform2f(p1.u("uDir"), 1f, 0f);
-        GLES20.glUniform1f(p1.u("uRadius"), st.blur);
-        GLES20.glUniform1f(p1.u("uBilateral"), st.bilateral);
-        GLES20.glUniformMatrix4fv(p1.u("uTexMatrix"), 1, false, texMatrix, 0);
-        drawQuad(p1);
+        GLES20.glUniform1i(pd.u("uTex"), 0);
+        GLES20.glUniformMatrix4fv(pd.u("uTexMatrix"), 1, false, texMatrix, 0);
+        GLES20.glUniform2f(pd.u("uSrcTexel"), 1f / fboW, 1f / fboH);
+        drawQuad(pd);
 
+        // 2) 水平保边平滑（半分辨率下半径换算为 2 倍，等效全分辨率 2*R 像素）
+        float radius = st.blur * 2f;
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboB);
-        GLES20.glViewport(0, 0, fboW, fboH);
-        Program p2 = progBlurTex;
-        GLES20.glUseProgram(p2.id);
+        GLES20.glViewport(0, 0, halfW, halfH);
+        Program pb = progBlur;
+        GLES20.glUseProgram(pb.id);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texA);
-        GLES20.glUniform1i(p2.u("uTex"), 0);
-        GLES20.glUniform2f(p2.u("uTexel"), 1f / fboW, 1f / fboH);
-        GLES20.glUniform2f(p2.u("uDir"), 0f, 1f);
-        GLES20.glUniform1f(p2.u("uRadius"), st.blur);
-        GLES20.glUniform1f(p2.u("uBilateral"), st.bilateral);
-        drawQuad(p2);
+        GLES20.glUniform1i(pb.u("uTex"), 0);
+        GLES20.glUniform2f(pb.u("uTexel"), 1f / halfW, 1f / halfH);
+        GLES20.glUniform2f(pb.u("uDir"), 1f, 0f);
+        GLES20.glUniform1f(pb.u("uRadius"), radius);
+        GLES20.glUniform1f(pb.u("uBilateral"), st.bilateral);
+        drawQuad(pb);
+
+        // 3) 垂直保边平滑 -> texA 为最终平滑结果
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboA);
+        GLES20.glViewport(0, 0, halfW, halfH);
+        GLES20.glUseProgram(pb.id);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texB);
+        GLES20.glUniform1i(pb.u("uTex"), 0);
+        GLES20.glUniform2f(pb.u("uDir"), 0f, 1f);
+        drawQuad(pb);
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
     }
@@ -554,8 +570,10 @@ public class CartoonRenderer {
         GLES20.glUniform1f(p.u("uSnap"), snap);
         GLES20.glUniformMatrix4fv(p.u("uTexMatrix"), 1, false, texMatrix, 0);
         GLES20.glUniform2f(p.u("uTexel"), 1f / fboW, 1f / fboH);
+        GLES20.glUniform2f(p.u("uBlurTexel"), 1f / halfW, 1f / halfH);
         GLES20.glUniform1f(p.u("uDetail"), st.detail);
         GLES20.glUniform1f(p.u("uLevels"), st.levels);
+        GLES20.glUniform1f(p.u("uChroma"), st.chroma);
         GLES20.glUniform1f(p.u("uSat"), st.sat);
         GLES20.glUniform1f(p.u("uEdge"), st.edge);
         GLES20.glUniform1f(p.u("uThresh"), st.thresh);
@@ -602,8 +620,8 @@ public class CartoonRenderer {
 
     private boolean buildPrograms() {
         try {
-            progBlurOes = new Program(VS_CAMERA, FS_BLUR_OES);
-            progBlurTex = new Program(VS_PLAIN, FS_BLUR_TEX);
+            progDown = new Program(VS_CAMERA, FS_DOWN);
+            progBlur = new Program(VS_PLAIN, FS_BLUR);
             progFinal = new Program(VS_FINAL, FS_FINAL);
             return true;
         } catch (Throwable t) {
@@ -703,7 +721,27 @@ public class CartoonRenderer {
             "}"
     );
 
-    private static final String FS_BLUR_BODY = glsl(
+    /** 相机纹理 -> 半分辨率，2x2 盒式降采样。 */
+    private static final String FS_DOWN = glsl(
+            "#extension GL_OES_EGL_image_external : require",
+            "precision mediump float;",
+            "uniform samplerExternalOES uTex;",
+            "uniform vec2 uSrcTexel;",
+            "varying vec2 vUv;",
+            "void main() {",
+            "  vec2 o = uSrcTexel * 0.5;",
+            "  vec3 c = texture2D(uTex, vUv + vec2(-o.x, -o.y)).rgb;",
+            "  c += texture2D(uTex, vUv + vec2(o.x, -o.y)).rgb;",
+            "  c += texture2D(uTex, vUv + vec2(-o.x, o.y)).rgb;",
+            "  c += texture2D(uTex, vUv + vec2(o.x, o.y)).rgb;",
+            "  gl_FragColor = vec4(c * 0.25, 1.0);",
+            "}"
+    );
+
+    /** 可分离双边平滑（保边去细节，形成平整色块）。 */
+    private static final String FS_BLUR = glsl(
+            "precision mediump float;",
+            "uniform sampler2D uTex;",
             "varying vec2 vUv;",
             "uniform vec2 uTexel;",
             "uniform vec2 uDir;",
@@ -732,19 +770,6 @@ public class CartoonRenderer {
             "}"
     );
 
-    private static final String FS_BLUR_OES = glsl(
-            "#extension GL_OES_EGL_image_external : require",
-            "precision mediump float;",
-            "uniform samplerExternalOES uTex;",
-            FS_BLUR_BODY
-    );
-
-    private static final String FS_BLUR_TEX = glsl(
-            "precision mediump float;",
-            "uniform sampler2D uTex;",
-            FS_BLUR_BODY
-    );
-
     private static final String FS_FINAL = glsl(
             "#extension GL_OES_EGL_image_external : require",
             "precision mediump float;",
@@ -754,8 +779,10 @@ public class CartoonRenderer {
             "uniform mat4 uTexMatrix;",
             "uniform float uSnap;",
             "uniform vec2 uTexel;",
+            "uniform vec2 uBlurTexel;",
             "uniform float uDetail;",
             "uniform float uLevels;",
+            "uniform float uChroma;",
             "uniform float uSat;",
             "uniform float uEdge;",
             "uniform float uThresh;",
@@ -774,8 +801,9 @@ public class CartoonRenderer {
             "  vec2 uv = vUv;",
             "  if (uSnap > 0.0) { uv = (floor(uv / uSnap) + 0.5) * uSnap; }",
             "  vec3 orig = texture2D(uVideo, (uTexMatrix * vec4(uv, 0.0, 1.0)).xy).rgb;",
-            "  vec3 base = mix(orig, texture2D(uBlur, uv).rgb, uDetail);",
-            "  vec2 e = uTexel * uEdgeWidth;",
+            "  vec3 soft = texture2D(uBlur, uv).rgb;",
+            "  vec3 base = mix(soft, orig, uDetail);",
+            "  vec2 e = uBlurTexel * uEdgeWidth;",
             "  float l1 = luma(texture2D(uBlur, uv + vec2(-e.x, -e.y)).rgb);",
             "  float l2 = luma(texture2D(uBlur, uv + vec2(0.0, -e.y)).rgb);",
             "  float l3 = luma(texture2D(uBlur, uv + vec2(e.x, -e.y)).rgb);",
@@ -786,11 +814,17 @@ public class CartoonRenderer {
             "  float l8 = luma(texture2D(uBlur, uv + vec2(e.x, e.y)).rgb);",
             "  float gx = (l3 + 2.0 * l5 + l8) - (l1 + 2.0 * l4 + l6);",
             "  float gy = (l6 + 2.0 * l7 + l8) - (l1 + 2.0 * l2 + l3);",
-            "  float edge = smoothstep(uThresh, uThresh + 0.13, length(vec2(gx, gy)) * 0.25);",
-            "  base *= uBright;",
-            "  float lum = luma(base);",
-            "  base = mix(vec3(lum), base, uSat);",
-            "  if (uLevels >= 2.0) { base = floor(base * uLevels + 0.5) / uLevels; }",
+            "  float grad = length(vec2(gx, gy));",
+            "  float edge = smoothstep(uThresh, uThresh + 0.10, grad);",
+            "  float Y = clamp(luma(base) * uBright, 0.0, 1.0);",
+            "  vec3 ch = base - vec3(luma(base));",
+            "  float I = dot(ch, vec3(0.596, -0.274, -0.322)) * uSat;",
+            "  float Q = dot(ch, vec3(0.211, -0.523, 0.312)) * uSat;",
+            "  Y = floor(Y * uLevels + 0.5) / uLevels;",
+            "  I = floor(I * uChroma + 0.5) / uChroma;",
+            "  Q = floor(Q * uChroma + 0.5) / uChroma;",
+            "  base = vec3(Y) + vec3(0.956, -0.272, -1.106) * I + vec3(0.621, -0.647, 1.703) * Q;",
+            "  base = clamp(base, 0.0, 1.0);",
             "  if (uGray > 0.5) { base = vec3(luma(base)); }",
             "  if (uSketch > 0.5) {",
             "    float d = 1.0 - luma(base);",
@@ -808,9 +842,10 @@ public class CartoonRenderer {
             "  }",
             "  base *= (1.0 - edge * uEdge);",
             "  if (uNeon > 0.5) {",
+            "    float halo = smoothstep(uThresh + 0.12, uThresh + 0.5, grad);",
             "    vec3 glow = clamp(base * 3.0, 0.0, 1.0);",
             "    vec3 ring = mix(vec3(0.15, 0.85, 1.0), vec3(1.0, 0.25, 0.75), smoothstep(0.2, 0.7, luma(base)));",
-            "    base = base * 0.18 + glow * 0.09 + ring * edge * 1.6;",
+            "    base = base * 0.26 + glow * 0.10 + ring * (edge * 0.30 + halo * 1.25);",
             "  }",
             "  if (uGrain > 0.001) {",
             "    float n = hash(uv / uTexel + floor(uTime * 12.0));",
