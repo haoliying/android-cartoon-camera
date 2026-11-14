@@ -32,13 +32,13 @@ strong { color: #ffffff; }
 </head>
 <body><main>
 <h1 id="呆瓜相机--操作手册">呆瓜相机 · 操作手册</h1>
-<p>适用版本：<strong>v1.13</strong>（versionCode 14）<br />
+<p>适用版本：<strong>v1.14</strong>（versionCode 15）<br />
 系统要求：Android 7.0 及以上<br />
 包名：<code>com.qoder.daiguacamera</code></p>
 <hr />
 <h2 id="1-安装与首次启动">1. 安装与首次启动</h2>
 <ol>
-<li>安装 <code>daigua-camera-v1.13.apk</code>。如果手机提示“未知来源”，允许当前文件管理器安装即可。</li>
+<li>安装 <code>daigua-camera-v1.14.apk</code>。如果手机提示“未知来源”，允许当前文件管理器安装即可。</li>
 <li>首次打开会申请 <strong>相机</strong> 和 <strong>麦克风</strong> 权限：
 <ul>
 <li>相机：必需，否则无法预览和拍摄。</li>
@@ -94,9 +94,10 @@ strong { color: #ffffff; }
 <li><strong>傻瓜</strong>：25 个场景任选，点场景名切换，和拍照共用同一套场景参数。</li>
 </ul></li>
 <li>点一次快门开始录制，顶部出现红点和计时。</li>
-<li>再点一次快门停止并保存。</li>
-<li>视频保存到相册的 <code>Movies/DaiguaCamera</code>，完成后会提示保存位置。</li>
+<li>再点一次快门停止。视频会<strong>直接保存到相册</strong>，不再弹“已保存”提示或预览。</li>
+<li>视频保存到 <code>Movies/DaiguaCamera</code>。</li>
 </ol>
+<p><strong>同时保存原素材</strong>（在「风格」面板里打开）：风格不是「正常」时，录像会先保存一份未加风格的原片（文件名带 <code>_原片</code>），再在后台生成一份叠加风格的版本，两份都带声音、都进相册；生成期间可以点弹窗取消，原片会保留。风格为「正常」时只保存一份。</p>
 <p>录像的曝光、白平衡、对焦参数会实时作用在录制画面上；风格仍然来自「风格」面板。选「正常」就是相机原始画面，选卡通类风格就是实时卡通画面。</p>
 <blockquote>
 <p>录像和拍照的模式、专业参数、场景分别记忆，切换拍摄方式不会互相覆盖。场景本身是共用的，在一个模式下调整参数，另一个模式里也会看到。</p>
@@ -146,6 +147,7 @@ strong { color: #ffffff; }
 <p>以上参数在录像的「专业」模式里同样可调；录像时快门上限为 1/30 秒。</p>
 <p>设置会记在本机，下次打开仍然保留；拍照和录像的专业参数分别保存。</p>
 <p>调好后点「存为场景」，给这组参数起个名字，就会保存到傻瓜模式的场景列表里，以后一键复用。</p>
+<p>拍照完成后同样<strong>直接保存到相册</strong>，不再弹预览和“已保存”提示。打开「同时保存原素材」且风格不是「正常」时，会存两张：一张相机原图（文件名带 <code>_原图</code>），一张叠加风格的成品；「正常」风格只存一张。</p>
 <h3 id="43-傻瓜">4.3 傻瓜</h3>
 <p>内置 25 个场景，按类别大致分为：</p>
 <ul>
@@ -259,7 +261,12 @@ strong { color: #ffffff; }
 </tr>
 </tbody>
 </table>
-<p>风格面板下方的「卡通强度」滑块为 0%–100%，只对卡通类风格有效；「正常」下自动置灰。设置会记忆，下次打开保持不变。</p>
+<p>风格面板下方的「卡通强度」滑块为 0%–100%，只对卡通类风格有效；「正常」下自动置灰。再往下是「同时保存原素材」开关：</p>
+<ul>
+<li>打开后，非「正常」风格拍照/录像会各保存两份：一份原素材，一份叠加风格。</li>
+<li>「正常」风格只保存一份，不重复占空间。</li>
+<li>开关会记忆，下次打开保持不变。</li>
+</ul>
 <p>「正常」模式下，预览、录像、拍照、相册处理都原样输出，只保留画面裁剪和前置镜像。</p>
 <hr />
 <h2 id="7-小精灵">7. 小精灵</h2>
@@ -299,8 +306,16 @@ strong { color: #ffffff; }
 <td><code>Pictures/DaiguaCamera</code></td>
 </tr>
 <tr class="even">
+<td>拍照原图（开启保存原素材时）</td>
+<td><code>Pictures/DaiguaCamera</code>，文件名带 <code>_原图</code></td>
+</tr>
+<tr class="odd">
 <td>录像 / 相册视频</td>
 <td><code>Movies/DaiguaCamera</code></td>
+</tr>
+<tr class="even">
+<td>录像原片（开启保存原素材时）</td>
+<td><code>Movies/DaiguaCamera</code>，文件名带 <code>_原片</code></td>
 </tr>
 </tbody>
 </table>
@@ -330,7 +345,7 @@ Android 9 及以下需要存储权限；同时确认手机剩余空间充足。<
 <hr />
 <h2 id="11-版本与反馈">11. 版本与反馈</h2>
 <ul>
-<li>当前版本：v1.13（versionCode 14）</li>
+<li>当前版本：v1.14（versionCode 15）</li>
 <li>内置文档：点顶部「说明」，可离线查看 <strong>操作手册</strong> 和 <strong>更新说明</strong>，内容随 APK 一起安装</li>
 <li>历史更新：<a href="changelog.html">CHANGELOG.md</a></li>
 <li>项目与下载：<a href="https://github.com/haoliying/daigua-camera">https://github.com/haoliying/daigua-camera</a></li>

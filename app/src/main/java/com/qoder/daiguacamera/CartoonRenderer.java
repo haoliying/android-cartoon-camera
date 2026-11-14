@@ -74,6 +74,8 @@ public class CartoonRenderer {
 
     private int previewW, previewH;
     private int encoderW, encoderH;
+    /** 录像编码器走“原始画面”通道：不加风格、不画小精灵，用于同时保存原素材。 */
+    private boolean encoderPlain;
 
     private int cameraTextureId;
     private SurfaceTexture cameraTexture;
@@ -328,8 +330,14 @@ public class CartoonRenderer {
     public void stopEncoder(Runnable done) {
         post(() -> {
             destroyEncoderInternal();
+            encoderPlain = false;
             if (done != null) mainHandler.post(done);
         });
+    }
+
+    /** 下一次录像是否把未加风格的相机画面写进编码器。 */
+    public void setEncoderPlain(boolean plain) {
+        post(() -> encoderPlain = plain);
     }
 
     // ------------------------------------------------------------------ GL init
@@ -615,7 +623,7 @@ public class CartoonRenderer {
             blit(previewSurface, previewW, previewH);
         }
         if (encoderSurface != EGL14.EGL_NO_SURFACE && encoderW > 0 && encoderH > 0) {
-            blit(encoderSurface, encoderW, encoderH);
+            blit(encoderSurface, encoderW, encoderH, encoderPlain);
         }
     }
 
@@ -665,10 +673,14 @@ public class CartoonRenderer {
     }
 
     private void blit(EGLSurface target, int vw, int vh) {
+        blit(target, vw, vh, false);
+    }
+
+    private void blit(EGLSurface target, int vw, int vh, boolean forcePlain) {
         if (!makeCurrent(target)) return;
         GLES20.glViewport(0, 0, vw, vh);
         StylePreset st = style;
-        boolean plain = st.normal;
+        boolean plain = forcePlain || st.normal;
         Program p = plain ? progPlain : progFinal;
         if (p == null) return;
         GLES20.glUseProgram(p.id);
@@ -724,7 +736,8 @@ public class CartoonRenderer {
         }
         drawQuad(p);
 
-        drawSprites(vw, vh);
+        // 原素材通道不叠加小精灵；正常风格的预览/录像仍按开关显示小精灵
+        if (!forcePlain) drawSprites(vw, vh);
 
         if (target == previewSurface && pendingGrab != null) {
             final FrameGrab g = pendingGrab;

@@ -733,6 +733,47 @@ public class GalleryProcessor {
         return saveBitmap(ctx, bmp);
     }
 
+    /**
+     * 把相机原图（未叠加任何风格的 JPEG 字节）原样存进相册。
+     * “同时保存原素材”开启时，拍照会额外保存这一张。
+     */
+    public static String saveOriginalJpeg(Context ctx, byte[] jpeg) {
+        String name = "Daigua_" + timestamp() + "_原图.jpg";
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ContentValues v = new ContentValues();
+                v.put(MediaStore.Images.Media.DISPLAY_NAME, name);
+                v.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+                v.put(MediaStore.Images.Media.RELATIVE_PATH,
+                        Environment.DIRECTORY_PICTURES + "/DaiguaCamera");
+                v.put(MediaStore.Images.Media.IS_PENDING, 1);
+                ContentResolver cr = ctx.getContentResolver();
+                Uri uri = cr.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+                if (uri == null) throw new IllegalStateException("无法创建原图文件");
+                try (OutputStream out = cr.openOutputStream(uri)) {
+                    if (out == null) throw new IllegalStateException("无法写入原图");
+                    out.write(jpeg);
+                }
+                v.clear();
+                v.put(MediaStore.Images.Media.IS_PENDING, 0);
+                cr.update(uri, v, null, null);
+            } else {
+                File dir = new File(Environment.getExternalStoragePublicDirectory(
+                        Environment.DIRECTORY_PICTURES), "DaiguaCamera");
+                if (!dir.exists() && !dir.mkdirs()) throw new IllegalStateException("无法创建保存目录");
+                File f = new File(dir, name);
+                try (OutputStream out = new FileOutputStream(f)) {
+                    out.write(jpeg);
+                }
+                MediaScannerConnection.scanFile(ctx, new String[]{f.getAbsolutePath()}, null, null);
+            }
+            return "已保存原图 · Pictures/DaiguaCamera";
+        } catch (Throwable t) {
+            Log.e(TAG, "saveOriginalJpeg", t);
+            throw new IllegalStateException(t.getMessage() == null ? "保存原图失败" : t.getMessage());
+        }
+    }
+
     private static String saveBitmap(Context ctx, Bitmap bmp) {
         String name = "Daigua_" + timestamp() + ".jpg";
         try {

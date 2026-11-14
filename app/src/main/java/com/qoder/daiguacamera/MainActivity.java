@@ -60,6 +60,7 @@ import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -152,6 +153,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private TextView styleBtn;
     private ZoomSlider zoomSlider;
 
+    /** 是否在非正常风格下额外保存一份未加风格的原素材。 */
+    private boolean saveOriginal;
+    /** 本次录像是否把原始画面写进编码器（开启保存原素材且非正常风格）。 */
+    private boolean recorderPlain;
+    private StylePreset recStyle = StylePreset.ALL[0];
+    private float recIntensity = 0.95f;
+    private boolean recSprites;
+
     // 闪光灯：自动 / 常开 / 常闭
     private static final int FLASH_AUTO = 0;
     private static final int FLASH_ON = 1;
@@ -212,6 +221,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         photoSub = prefs.getInt("photoSub", SUB_NORMAL);
         videoSub = prefs.getInt("videoSub", SUB_NORMAL);
         flashMode = Math.max(FLASH_AUTO, Math.min(FLASH_OFF, prefs.getInt("flash", FLASH_AUTO)));
+        saveOriginal = prefs.getBoolean("save_original", false);
         proParams = loadProParams("pro_", true);
         videoProParams = loadProParams("vpro_", false);
         sceneStore = new SceneStore(this);
@@ -795,6 +805,29 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         });
         intRow.addView(intensityBar, new LinearLayout.LayoutParams(MATCH, WRAP));
         box.addView(intRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        LinearLayout originalRow = new LinearLayout(this);
+        originalRow.setOrientation(LinearLayout.VERTICAL);
+        originalRow.setPadding(0, dp(12), 0, 0);
+
+        Switch originalSw = new Switch(this);
+        originalSw.setText("同时保存原素材");
+        originalSw.setTextColor(0xFFE9EAF2);
+        originalSw.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        originalSw.setChecked(saveOriginal);
+        originalSw.setOnCheckedChangeListener((b, checked) -> {
+            saveOriginal = checked;
+            prefs.edit().putBoolean("save_original", checked).apply();
+        });
+        originalRow.addView(originalSw);
+
+        TextView originalTip = new TextView(this);
+        originalTip.setText("非正常风格时，拍照/录像会各存两份：一份原素材，一份叠加风格。正常风格只存一份。");
+        originalTip.setTextColor(0xFF9AA0B2);
+        originalTip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        originalTip.setPadding(dp(2), 0, dp(2), 0);
+        originalRow.addView(originalTip);
+        box.addView(originalRow, new LinearLayout.LayoutParams(MATCH, WRAP));
         updateIntensityEnabled();
 
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
@@ -987,12 +1020,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         final StylePreset st = style;
         final float in = intensity;
         final boolean spr = spritesOn;
+        // 非正常风格且开启了“保存原素材”：先把相机原始 JPEG 原样存一份
+        final boolean saveRaw = saveOriginal && !st.normal;
         final AtomicBoolean cancel = new AtomicBoolean(false);
         processing = true;
         processingCancel = cancel;
 
         final AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("照片卡通化")
+                .setTitle(st.normal ? "保存照片" : "照片卡通化")
                 .setMessage("处理中…")
                 .setNegativeButton("取消", (d, w) -> cancel.set(true))
                 .setCancelable(false)
@@ -1000,7 +1035,15 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         progressDialog = dialog;
         dialog.show();
 
-        worker.execute(() -> GalleryProcessor.processJpegBytes(this, jpeg, st, in, spr, cancel,
+        worker.execute(() -> {
+            if (saveRaw) {
+                try {
+                    GalleryProcessor.saveOriginalJpeg(this, jpeg);
+                } catch (Throwable t) {
+                    Log.e(TAG, "save original jpeg", t);
+                }
+            }
+            GalleryProcessor.processJpegBytes(this, jpeg, st, in, spr, cancel,
                 new GalleryProcessor.Listener() {
                     @Override
                     public void onProgress(float p, String label) {
@@ -1013,15 +1056,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
                     @Override
                     public void onDone(String message, Bitmap preview) {
+                        if (preview != null) preview.recycle();
                         ui.post(() -> {
                             dismissProgress();
                             processing = false;
                             processingCancel = null;
                             capturing = false;
                             updateShutterBusy();
-                            if (isFinishing() || isDestroyed()) return;
-                            if (preview != null) showPreview(message, preview);
-                            else toast(message);
+                            // 拍完直接进相册，不再弹预览或“已保存”提示
                         });
                     }
 
@@ -1036,7 +1078,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                             if (!isFinishing() && !isDestroyed()) showPhotoError(message);
                         });
                     }
-                }));
+                });
+        });
     }
 
     /**
@@ -1060,15 +1103,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             public void onFrame(Bitmap frame) {
                 worker.execute(() -> {
                     try {
-                        String where = GalleryProcessor.saveToGallery(MainActivity.this, frame);
+                        GalleryProcessor.saveToGallery(MainActivity.this, frame);
                         ui.post(() -> {
                             previewFallbackBusy = false;
                             processing = false;
-                            if (isFinishing() || isDestroyed()) {
-                                frame.recycle();
-                                return;
-                            }
-                            showPreview(where + "（相机原图不可用，已保存预览画面）", frame);
+                            frame.recycle();
+                            // 兜底也只安静地存进相册，失败时才提示
                         });
                     } catch (Throwable t) {
                         frame.recycle();
@@ -2403,6 +2443,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     private void startRecording() {
         if (recording || recorderStarted) return;
+        if (processing) {
+            toast("正在处理上一段，请稍候");
+            return;
+        }
         if (!surfaceReady || cameraSurface == null || !cameraOpened) {
             toast("相机还没准备好");
             return;
@@ -2452,6 +2496,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             Surface s = rec.getSurface();
             recorder = rec;
             final int fw = recW, fh = recH;
+            // 开启“保存原素材”且当前不是正常风格：先用编码器录下未加风格的原片，
+            // 停止后再离线生成一份叠加风格的版本，两份都带声音。
+            recStyle = style;
+            recIntensity = intensity;
+            recSprites = spritesOn;
+            recorderPlain = saveOriginal && !style.normal;
+            renderer.setEncoderPlain(recorderPlain);
             renderer.startEncoder(s, fw, fh, new CartoonRenderer.EncoderCallback() {
                 @Override
                 public void onEncoderReady() {
@@ -2519,11 +2570,102 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         }
         recorderStarted = false;
         if (ok) {
-            publishOutput();
+            OutputTarget out = publishOutput();
+            if (out != null && recorderPlain) {
+                markOriginalName(out);
+                startStyledCopy(out);
+            }
         } else {
             discardOutput();
             toast("录像没有保存（没有采集到画面）");
         }
+    }
+
+    /** 给双份保存里的原片加个“_原片”后缀，方便和风格版本区分。 */
+    private void markOriginalName(OutputTarget out) {
+        if (out == null) return;
+        String n = out.name == null ? "" : out.name;
+        String base = n.toLowerCase(Locale.US).endsWith(".mp4")
+                ? n.substring(0, n.length() - 4) : n;
+        String newName = (base.isEmpty() ? "Daigua" : base) + "_原片.mp4";
+        try {
+            if (out.uri != null) {
+                ContentValues v = new ContentValues();
+                v.put(MediaStore.Video.Media.DISPLAY_NAME, newName);
+                getContentResolver().update(out.uri, v, null, null);
+                out.name = newName;
+            } else if (out.file != null) {
+                File dst = new File(out.file.getParentFile(), newName);
+                if (out.file.renameTo(dst)) {
+                    out.file = dst;
+                    out.name = newName;
+                    MediaScannerConnection.scanFile(this,
+                            new String[]{dst.getAbsolutePath()}, null, null);
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "rename original", t);
+        }
+    }
+
+    /**
+     * “保存原素材”开启且为非正常风格时：刚录好的原片已经进相册，
+     * 这里用离线管线再生成一份叠加风格的视频，两份都保留。
+     */
+    private void startStyledCopy(OutputTarget out) {
+        if (out == null || isFinishing() || isDestroyed()) return;
+        final Uri src = out.uri != null ? out.uri : Uri.fromFile(out.file);
+        if (src == null) return;
+        final StylePreset st = recStyle;
+        final float in = recIntensity;
+        final boolean spr = recSprites;
+        processing = true;
+        final AtomicBoolean cancel = new AtomicBoolean(false);
+        processingCancel = cancel;
+
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("正在生成风格版本")
+                .setMessage("原片已保存，正在生成叠加风格的视频…")
+                .setNegativeButton("取消", (d, w) -> cancel.set(true))
+                .setCancelable(false)
+                .create();
+        progressDialog = dialog;
+        dialog.show();
+
+        worker.execute(() -> GalleryProcessor.process(this, src, "video/mp4", st, in, spr, cancel,
+                new GalleryProcessor.Listener() {
+                    @Override
+                    public void onProgress(float p, String label) {
+                        ui.post(() -> {
+                            if (progressDialog != null && progressDialog.isShowing()) {
+                                progressDialog.setMessage(label);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onDone(String message, Bitmap preview) {
+                        if (preview != null) preview.recycle();
+                        ui.post(() -> {
+                            dismissProgress();
+                            processing = false;
+                            processingCancel = null;
+                            // 生成完成也只安静地存进相册
+                        });
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        ui.post(() -> {
+                            dismissProgress();
+                            processing = false;
+                            processingCancel = null;
+                            if (!isFinishing() && !isDestroyed()) {
+                                toast("原片已保存，风格版本生成失败：" + message);
+                            }
+                        });
+                    }
+                }));
     }
 
     private void abortRecording() {
@@ -2607,23 +2749,25 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         return out;
     }
 
-    private void publishOutput() {
+    /**
+     * 把录好的文件正式放进相册。录完不再弹“已保存”提示，返回落盘目标供“生成风格版本”使用。
+     */
+    private OutputTarget publishOutput() {
         OutputTarget out = pendingOutput;
         pendingOutput = null;
-        if (out == null) return;
+        if (out == null) return null;
         try {
             if (out.uri != null) {
                 ContentValues v = new ContentValues();
                 v.put(MediaStore.Video.Media.IS_PENDING, 0);
                 getContentResolver().update(out.uri, v, null, null);
-                toast("已保存到相册 · Movies/DaiguaCamera");
             } else if (out.file != null) {
                 MediaScannerConnection.scanFile(this, new String[]{out.file.getAbsolutePath()}, null, null);
-                toast("已保存：" + out.name);
             }
         } catch (Throwable t) {
             Log.e(TAG, "publish", t);
-            discardOutput();
+            discardTarget(out);
+            return null;
         } finally {
             if (out.pfd != null) {
                 try {
@@ -2632,11 +2776,16 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 }
             }
         }
+        return out;
     }
 
     private void discardOutput() {
         OutputTarget out = pendingOutput;
         pendingOutput = null;
+        discardTarget(out);
+    }
+
+    private void discardTarget(OutputTarget out) {
         if (out == null) return;
         if (out.pfd != null) {
             try {
