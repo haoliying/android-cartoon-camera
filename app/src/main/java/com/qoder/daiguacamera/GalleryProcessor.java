@@ -333,8 +333,56 @@ public class GalleryProcessor {
 
     // ------------------------------------------------------------------ 视频
 
+    /** 正常模式且不开精灵时，视频原样复制到相册，不重新编码（仅限 mp4）。 */
+    private static boolean isMp4(Context ctx, Uri uri) {
+        try {
+            String mime = ctx.getContentResolver().getType(uri);
+            if (mime != null) return "video/mp4".equalsIgnoreCase(mime);
+        } catch (Throwable ignored) {
+        }
+        String n = uri.getLastPathSegment();
+        return n == null || n.toLowerCase(java.util.Locale.US).endsWith(".mp4");
+    }
+
+    private static void doVideoCopy(Context ctx, Uri uri, AtomicBoolean cancel, Listener l) {
+        File tmp = new File(ctx.getCacheDir(), "normal_" + System.currentTimeMillis() + ".mp4");
+        try {
+            l.onProgress(0.05f, "读取视频…");
+            InputStream in = ctx.getContentResolver().openInputStream(uri);
+            if (in == null) throw new IllegalStateException("无法读取这个视频");
+            try (InputStream src = in; OutputStream out = new FileOutputStream(tmp)) {
+                byte[] buf = new byte[256 * 1024];
+                long copied = 0;
+                int n;
+                while ((n = src.read(buf)) > 0) {
+                    if (cancel.get()) throw new Cancelled();
+                    out.write(buf, 0, n);
+                    copied += n;
+                    l.onProgress(0.5f, "复制中… " + (copied / (1024 * 1024)) + " MB");
+                }
+            }
+            l.onProgress(0.9f, "写入相册…");
+            String where = saveVideoFile(ctx, tmp, "Daigua_" + timestamp() + ".mp4");
+            l.onProgress(1f, "完成");
+            l.onDone(where, null);
+        } catch (Cancelled c) {
+            throw c;
+        } catch (Throwable t) {
+            Log.e(TAG, "doVideoCopy", t);
+            String m = t.getMessage();
+            throw new IllegalStateException(m == null || m.isEmpty() ? "视频保存失败" : m);
+        } finally {
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
+        }
+    }
+
     private static void doVideo(Context ctx, Uri uri, StylePreset style, float intensity,
                                 boolean spritesOn, AtomicBoolean cancel, Listener l) {
+        if (style.normal && !spritesOn && isMp4(ctx, uri)) {
+            doVideoCopy(ctx, uri, cancel, l);
+            return;
+        }
         MediaExtractor extractor = new MediaExtractor();
         MediaExtractor audioExtractor = null;
         MediaCodec decoder = null;
@@ -834,7 +882,7 @@ public class GalleryProcessor {
         private EGLSurface encoderSurface = EGL14.EGL_NO_SURFACE;
 
         private int quad;
-        private Program pDownOes, pDown2d, pBlur, pFinalOes, pFinal2d;
+        private Program pDownOes, pDown2d, pBlur, pFinalOes, pFinal2d, pPlainOes, pPlain2d;
 
         private int fboA, texA, fboB, texB, fw, fh;
         private int oesTex;
@@ -910,6 +958,8 @@ public class GalleryProcessor {
             pBlur = new Program(CartoonRenderer.VS_PLAIN, CartoonRenderer.FS_BLUR);
             pFinalOes = new Program(CartoonRenderer.VS_FINAL, CartoonRenderer.FS_FINAL);
             pFinal2d = new Program(CartoonRenderer.VS_FINAL, to2d(CartoonRenderer.FS_FINAL));
+            pPlainOes = new Program(CartoonRenderer.VS_FINAL, CartoonRenderer.FS_PLAIN_OES);
+            pPlain2d = new Program(CartoonRenderer.VS_FINAL, to2d(CartoonRenderer.FS_PLAIN_OES));
 
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             GLES20.glDisable(GLES20.GL_BLEND);
@@ -1003,6 +1053,15 @@ public class GalleryProcessor {
                            boolean spritesOn) {
             int sw = src.getWidth();
             int sh = src.getHeight();
+            if (st.normal && !spritesOn) {
+                // 正常模式且不开精灵：完全跳过 GPU 卡通管线，直接拷贝原图
+                if (sw == ow && sh == oh) {
+                    Bitmap copy = src.copy(Bitmap.Config.ARGB_8888, false);
+                    if (copy == null) throw new IllegalStateException("无法复制照片");
+                    return copy;
+                }
+                return Bitmap.createScaledBitmap(src, ow, oh, true);
+            }
             int tw = Math.max(2, sw / 2);
             int th = Math.max(2, sh / 2);
             ensureFbos(tw, th);
@@ -1048,7 +1107,7 @@ public class GalleryProcessor {
                 // 3) 卡通化到输出尺寸
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outFbo);
                 GLES20.glViewport(0, 0, ow, oh);
-                Program pf = pFinal2d;
+                Program pf = st.normal ? pPlain2d : pFinal2d;
                 GLES20.glUseProgram(pf.id);
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, srcTex);
@@ -1176,7 +1235,7 @@ public class GalleryProcessor {
             // 3) 最终合成到编码器表面
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
             GLES20.glViewport(0, 0, outW, outH);
-            Program pf = pFinalOes;
+            Program pf = st.normal ? pPlainOes : pFinalOes;
             GLES20.glUseProgram(pf.id);
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTex);
@@ -1389,6 +1448,8 @@ public class GalleryProcessor {
             if (pBlur != null) pBlur.delete();
             if (pFinalOes != null) pFinalOes.delete();
             if (pFinal2d != null) pFinal2d.delete();
+            if (pPlainOes != null) pPlainOes.delete();
+            if (pPlain2d != null) pPlain2d.delete();
             if (encoderSurface != EGL14.EGL_NO_SURFACE) {
                 EGL14.eglDestroySurface(display, encoderSurface);
                 encoderSurface = EGL14.EGL_NO_SURFACE;

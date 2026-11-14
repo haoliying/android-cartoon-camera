@@ -168,7 +168,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         prefs = getSharedPreferences("cartoon", MODE_PRIVATE);
         intensity = prefs.getFloat("intensity", 0.95f);
-        style = StylePreset.byId(prefs.getString("style", "cartoon"));
+        style = StylePreset.byId(prefs.getString("style", "normal"));
         spritesOn = prefs.getBoolean("sprites", true);
         captureMode = prefs.getInt("captureMode", MODE_VIDEO);
         photoSub = prefs.getInt("photoSub", SUB_NORMAL);
@@ -456,6 +456,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             }
         });
         bottomPanel.addView(sliderRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+        updateIntensityEnabled();
 
         // 专业参数摘要 / 傻瓜场景摘要
         extraRow = new LinearLayout(this);
@@ -626,6 +627,17 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             chip.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
         }
         prefs.edit().putString("style", preset.id).apply();
+        updateIntensityEnabled();
+    }
+
+    /** 正常模式不做任何调色，风格强度滑块此时没有意义，置灰。 */
+    private void updateIntensityEnabled() {
+        boolean on = style == null || !style.normal;
+        if (intensityBar != null) {
+            intensityBar.setEnabled(on);
+            intensityBar.setAlpha(on ? 1f : 0.35f);
+        }
+        if (intensityValue != null) intensityValue.setAlpha(on ? 1f : 0.35f);
     }
 
     // ------------------------------------------------------------------ 快门 / 拍照

@@ -20,6 +20,8 @@ public class StylePreset {
     public final float grain;      // 颗粒
     public final float bright;     // 亮度
     public final float sketch;     // 素描
+    /** 正常：不做任何卡通处理，直接显示/保存相机原图。 */
+    public final boolean normal;
 
     public StylePreset(String id, String name, float blur, float bilateral, float detail,
                        float levels, float chroma, float sat, float edge, float thresh, float edgeWidth,
@@ -43,9 +45,11 @@ public class StylePreset {
         this.grain = grain;
         this.bright = bright;
         this.sketch = sketch;
+        this.normal = "normal".equals(id);
     }
 
     public static final StylePreset[] ALL = {
+            new StylePreset("normal", "正常", 0f, 0f, 1f, 256f, 256f, 1f, 0f, 0.30f, 1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f),
             new StylePreset("cartoon", "卡通", 2.2f, 0.20f, 0.08f, 8f, 16f, 1.25f, 0.80f, 0.30f, 1.2f, 0f, 0f, 0f, 0f, 0f, 1.06f, 0f),
             new StylePreset("comic", "漫画", 1.8f, 0.15f, 0.06f, 5f, 8f, 1.05f, 0.95f, 0.22f, 1.6f, 0.22f, 0f, 0f, 0f, 0f, 1.02f, 0f),
             new StylePreset("water", "水彩", 2.4f, 0.15f, 0.16f, 6f, 7f, 1.50f, 0.38f, 0.26f, 2.4f, 0f, 0f, 0f, 0f, 0.07f, 1.12f, 0f),

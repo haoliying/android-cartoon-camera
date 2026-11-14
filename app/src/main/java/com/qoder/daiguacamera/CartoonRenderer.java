@@ -81,7 +81,7 @@ public class CartoonRenderer {
 
     private int fboA, fboB, texA, texB, fboW, fboH, halfW, halfH;
     private int quadBuf;
-    private Program progDown, progBlur, progFinal, progSprite, progCopy;
+    private Program progDown, progBlur, progFinal, progSprite, progCopy, progPlain;
     private boolean frameScheduled;
 
     // 小精灵：内容缩略图 + 状态机 + 传感器运动
@@ -584,12 +584,14 @@ public class CartoonRenderer {
             if (progFinal != null) progFinal.delete();
             if (progSprite != null) progSprite.delete();
             if (progCopy != null) progCopy.delete();
+            if (progPlain != null) progPlain.delete();
         }
         progDown = null;
         progBlur = null;
         progFinal = null;
         progSprite = null;
         progCopy = null;
+        progPlain = null;
         deleteContentTarget();
         destroyEglInternal();
     }
@@ -607,7 +609,8 @@ public class CartoonRenderer {
             return;
         }
         updateSprites();
-        updateBlurPasses();
+        // 正常模式不做卡通处理；只有开着精灵时才需要平滑层来给小精灵选址
+        if (!style.normal || spritesEnabled) updateBlurPasses();
         if (previewSurface != EGL14.EGL_NO_SURFACE && previewW > 0 && previewH > 0) {
             blit(previewSurface, previewW, previewH);
         }
@@ -665,15 +668,19 @@ public class CartoonRenderer {
         if (!makeCurrent(target)) return;
         GLES20.glViewport(0, 0, vw, vh);
         StylePreset st = style;
-        Program p = progFinal;
+        boolean plain = st.normal;
+        Program p = plain ? progPlain : progFinal;
+        if (p == null) return;
         GLES20.glUseProgram(p.id);
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTextureId);
         GLES20.glUniform1i(p.u("uVideo"), 0);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texB);
-        GLES20.glUniform1i(p.u("uBlur"), 1);
+        if (!plain) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texB);
+            GLES20.glUniform1i(p.u("uBlur"), 1);
+        }
 
         float targetAspect = vw / (float) vh;
         float sourceAspect = fboW / (float) fboH;
@@ -685,34 +692,36 @@ public class CartoonRenderer {
         }
         cropX = cx;
         cropY = cy;
-        float snap = st.pixel > 1f ? (st.pixel / fboW) : 0f;
 
         GLES20.glUniform2f(p.u("uCrop"), cx, cy);
         GLES20.glUniform1f(p.u("uMirror"), mirror ? 1f : 0f);
-        GLES20.glUniform1f(p.u("uSnap"), snap);
         GLES20.glUniformMatrix4fv(p.u("uTexMatrix"), 1, false, texMatrix, 0);
-        GLES20.glUniform2f(p.u("uTexel"), 1f / fboW, 1f / fboH);
-        GLES20.glUniform2f(p.u("uBlurTexel"), 1f / halfW, 1f / halfH);
-        GLES20.glUniform1f(p.u("uDetail"), st.detail);
-        GLES20.glUniform1f(p.u("uLevels"), st.levels);
-        GLES20.glUniform1f(p.u("uChroma"), st.chroma);
-        GLES20.glUniform1f(p.u("uSat"), st.sat);
-        GLES20.glUniform1f(p.u("uEdge"), st.edge);
-        GLES20.glUniform1f(p.u("uThresh"), st.thresh);
-        GLES20.glUniform1f(p.u("uEdgeWidth"), st.edgeWidth);
-        GLES20.glUniform1f(p.u("uHalftone"), st.halftone);
-        GLES20.glUniform1f(p.u("uGray"), st.gray);
-        GLES20.glUniform1f(p.u("uNeon"), st.neon);
-        GLES20.glUniform1f(p.u("uGrain"), st.grain);
-        GLES20.glUniform1f(p.u("uBright"), st.bright);
-        GLES20.glUniform1f(p.u("uSketch"), st.sketch);
-        GLES20.glUniform1f(p.u("uIntensity"), intensity);
-        GLES20.glUniform1f(p.u("uTime"), animTime);
-        GLES20.glUniform1f(p.u("uAspect"), targetAspect);
-        GLES20.glUniform4f(p.u("uRip0"), sprites.ripU[0], sprites.ripV[0],
-                sprites.ripAge[0], sprites.ripOn[0] ? 1f : 0f);
-        GLES20.glUniform4f(p.u("uRip1"), sprites.ripU[1], sprites.ripV[1],
-                sprites.ripAge[1], sprites.ripOn[1] ? 1f : 0f);
+        if (!plain) {
+            float snap = st.pixel > 1f ? (st.pixel / fboW) : 0f;
+            GLES20.glUniform1f(p.u("uSnap"), snap);
+            GLES20.glUniform2f(p.u("uTexel"), 1f / fboW, 1f / fboH);
+            GLES20.glUniform2f(p.u("uBlurTexel"), 1f / halfW, 1f / halfH);
+            GLES20.glUniform1f(p.u("uDetail"), st.detail);
+            GLES20.glUniform1f(p.u("uLevels"), st.levels);
+            GLES20.glUniform1f(p.u("uChroma"), st.chroma);
+            GLES20.glUniform1f(p.u("uSat"), st.sat);
+            GLES20.glUniform1f(p.u("uEdge"), st.edge);
+            GLES20.glUniform1f(p.u("uThresh"), st.thresh);
+            GLES20.glUniform1f(p.u("uEdgeWidth"), st.edgeWidth);
+            GLES20.glUniform1f(p.u("uHalftone"), st.halftone);
+            GLES20.glUniform1f(p.u("uGray"), st.gray);
+            GLES20.glUniform1f(p.u("uNeon"), st.neon);
+            GLES20.glUniform1f(p.u("uGrain"), st.grain);
+            GLES20.glUniform1f(p.u("uBright"), st.bright);
+            GLES20.glUniform1f(p.u("uSketch"), st.sketch);
+            GLES20.glUniform1f(p.u("uIntensity"), intensity);
+            GLES20.glUniform1f(p.u("uTime"), animTime);
+            GLES20.glUniform1f(p.u("uAspect"), targetAspect);
+            GLES20.glUniform4f(p.u("uRip0"), sprites.ripU[0], sprites.ripV[0],
+                    sprites.ripAge[0], sprites.ripOn[0] ? 1f : 0f);
+            GLES20.glUniform4f(p.u("uRip1"), sprites.ripU[1], sprites.ripV[1],
+                    sprites.ripAge[1], sprites.ripOn[1] ? 1f : 0f);
+        }
         drawQuad(p);
 
         drawSprites(vw, vh);
@@ -964,6 +973,7 @@ public class CartoonRenderer {
             progFinal = new Program(VS_FINAL, FS_FINAL);
             progSprite = new Program(SpriteShaders.VS_SPRITE, SpriteShaders.FS_SPRITE);
             progCopy = new Program(VS_PLAIN, SpriteShaders.FS_COPY);
+            progPlain = new Program(VS_FINAL, FS_PLAIN_OES);
             return true;
         } catch (Throwable t) {
             notifyError("滤镜着色器编译失败：" + t.getMessage());
@@ -1110,6 +1120,18 @@ public class CartoonRenderer {
             "    ws += wa + wb;",
             "  }",
             "  gl_FragColor = vec4(sum / ws, 1.0);",
+            "}"
+    );
+
+    /** 正常模式：相机纹理原样输出（只做裁剪/镜像），不做任何卡通调色。 */
+    static final String FS_PLAIN_OES = glsl(
+            "#extension GL_OES_EGL_image_external : require",
+            "precision mediump float;",
+            "varying vec2 vUv;",
+            "uniform samplerExternalOES uVideo;",
+            "uniform mat4 uTexMatrix;",
+            "void main() {",
+            "  gl_FragColor = vec4(texture2D(uVideo, (uTexMatrix * vec4(vUv, 0.0, 1.0)).xy).rgb, 1.0);",
             "}"
     );
 
