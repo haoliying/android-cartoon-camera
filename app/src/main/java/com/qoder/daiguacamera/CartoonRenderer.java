@@ -96,6 +96,8 @@ public class CartoonRenderer {
     private long animStartNs;
     private float animTime, lastAnimT;
     private float cropX = 1f, cropY = 1f;
+    /** 超出设备数码变焦上限后的软件放大倍数（>=1）。 */
+    private volatile float extraZoom = 1f;
 
     private final float[] texMatrix = new float[16];
     private volatile StylePreset style = StylePreset.ALL[0];
@@ -116,6 +118,11 @@ public class CartoonRenderer {
 
     public void setMirror(boolean mirror) {
         this.mirror = mirror;
+    }
+
+    /** 设备变焦到顶后，渲染层继续裁切放大（只影响预览和录像）。 */
+    public void setExtraZoom(float z) {
+        extraZoom = Math.max(1f, Math.min(100f, z));
     }
 
     /** 开关小精灵；关闭时清空现有精灵。 */
@@ -701,6 +708,11 @@ public class CartoonRenderer {
             cx = targetAspect / sourceAspect;
         } else {
             cy = sourceAspect / targetAspect;
+        }
+        // 设备变焦到顶后，再按比例裁掉画面中心之外的部分
+        if (extraZoom > 1.001f) {
+            cx /= extraZoom;
+            cy /= extraZoom;
         }
         cropX = cx;
         cropY = cy;

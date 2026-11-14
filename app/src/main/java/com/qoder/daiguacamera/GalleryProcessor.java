@@ -33,6 +33,7 @@ import android.util.Log;
 import android.view.Surface;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -731,6 +732,75 @@ public class GalleryProcessor {
     /** 已卡通化的画布直接存相册（预览画面兜底用）。 */
     public static String saveToGallery(Context ctx, Bitmap bmp) {
         return saveBitmap(ctx, bmp);
+    }
+
+    /** 软件变焦：先按 EXIF 摆正，再把 JPEG 居中裁掉一部分，返回新的 JPEG 字节。 */
+    public static byte[] cropJpegCenter(byte[] jpeg, float keep) throws Exception {
+        if (jpeg == null || keep >= 0.999f) return jpeg;
+        float k = Math.max(0.02f, Math.min(1f, keep));
+        Bitmap src = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+        if (src == null) return jpeg;
+        Bitmap upright = src;
+        try {
+            int orientation = ExifInterface.ORIENTATION_NORMAL;
+            try (ByteArrayInputStream in = new ByteArrayInputStream(jpeg)) {
+                ExifInterface ex = new ExifInterface(in);
+                orientation = ex.getAttributeInt(ExifInterface.TAG_ORIENTATION,
+                        ExifInterface.ORIENTATION_NORMAL);
+            } catch (Throwable ignored) {
+            }
+            upright = applyOrientation(src, orientation);
+            int w = Math.max(1, Math.round(upright.getWidth() * k));
+            int h = Math.max(1, Math.round(upright.getHeight() * k));
+            int x = Math.max(0, (upright.getWidth() - w) / 2);
+            int y = Math.max(0, (upright.getHeight() - h) / 2);
+            Bitmap out = Bitmap.createBitmap(upright, x, y, w, h);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            out.compress(Bitmap.CompressFormat.JPEG, 95, bos);
+            if (out != upright) out.recycle();
+            return bos.toByteArray();
+        } finally {
+            if (upright != src) upright.recycle();
+            src.recycle();
+        }
+    }
+
+    /** 按 EXIF 方向把画面摆正；输出的 JPEG 方向即为正常。 */
+    private static Bitmap applyOrientation(Bitmap src, int orientation) {
+        Matrix m = new Matrix();
+        switch (orientation) {
+            case ExifInterface.ORIENTATION_FLIP_HORIZONTAL:
+                m.setScale(-1f, 1f);
+                break;
+            case ExifInterface.ORIENTATION_ROTATE_180:
+                m.setRotate(180f);
+                break;
+            case ExifInterface.ORIENTATION_FLIP_VERTICAL:
+                m.setScale(1f, -1f);
+                break;
+            case ExifInterface.ORIENTATION_TRANSPOSE:
+                m.setRotate(90f);
+                m.postScale(-1f, 1f);
+                break;
+            case ExifInterface.ORIENTATION_ROTATE_90:
+                m.setRotate(90f);
+                break;
+            case ExifInterface.ORIENTATION_TRANSVERSE:
+                m.setRotate(-90f);
+                m.postScale(-1f, 1f);
+                break;
+            case ExifInterface.ORIENTATION_ROTATE_270:
+                m.setRotate(-90f);
+                break;
+            default:
+                return src;
+        }
+        try {
+            Bitmap out = Bitmap.createBitmap(src, 0, 0, src.getWidth(), src.getHeight(), m, true);
+            return out != null ? out : src;
+        } catch (Throwable t) {
+            return src;
+        }
     }
 
     /**

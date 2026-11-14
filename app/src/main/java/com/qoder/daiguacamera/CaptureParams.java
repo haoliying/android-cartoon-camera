@@ -17,6 +17,8 @@ public class CaptureParams {
     public int focusMode = FOCUS_AUTO;
     /** 手动对焦距离（屈光度，0 = 无穷远，10 ≈ 10 厘米）。 */
     public float diopter;
+    /** 自动场景：由相机按光线和动静自动挑选场景模式。 */
+    public boolean autoScene;
 
     public CaptureParams copy() {
         CaptureParams p = new CaptureParams();
@@ -28,6 +30,7 @@ public class CaptureParams {
         p.kelvin = kelvin;
         p.focusMode = focusMode;
         p.diopter = diopter;
+        p.autoScene = autoScene;
         return p;
     }
 

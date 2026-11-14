@@ -385,11 +385,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         zoomBox = new FrameLayout(this);
         zoomDial = new ZoomDial(this);
         zoomDial.setRange(1f, 100f);
-        zoomDial.setListener((zoom, fromUser) -> {
-            if (cameraController != null) cameraController.setZoom(zoom);
-            updateZoomChip();
-        });
-        zoomBox.addView(zoomDial, new FrameLayout.LayoutParams(dp(128), dp(152)));
+        zoomDial.setListener((zoom, fromUser) -> applyZoom(zoom));
+        zoomBox.addView(zoomDial, new FrameLayout.LayoutParams(dp(148), dp(148)));
 
         zoomCollapse = circleButton("›", 15, 24);
         zoomCollapse.setContentDescription("收起焦距控制盘");
@@ -408,7 +405,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         zoomChip.setVisibility(View.GONE);
         zoomBox.addView(zoomChip, chipLp);
 
-        FrameLayout.LayoutParams zoomLp = new FrameLayout.LayoutParams(dp(128), dp(152));
+        FrameLayout.LayoutParams zoomLp = new FrameLayout.LayoutParams(dp(148), dp(148));
         zoomLp.gravity = Gravity.TOP | Gravity.END;
         zoomLp.topMargin = dp(64);
         zoomLp.rightMargin = dp(8);
@@ -604,10 +601,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     @Override
                     public boolean onScaleBegin(ScaleGestureDetector detector) {
                         if (cameraController == null) return false;
-                        if (cameraController.maxZoom() <= 1.01f) {
-                            if (cameraController.isZoomKnown()) toast("这个摄像头不支持变焦");
-                            return false;
-                        }
+                        if (!cameraController.isZoomKnown()) return false;
                         zoomStart = cameraController.getZoom();
                         return true;
                     }
@@ -618,9 +612,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                         // getScaleFactor() 是“相对上一次事件”的增量，必须累乘，
                         // 直接拿起始值相乘会导致倍数来回跳、捏合不跟手。
                         zoomStart *= detector.getScaleFactor();
-                        cameraController.setZoom(zoomStart);
+                        applyZoom(zoomStart);
                         zoomStart = cameraController.getZoom();
-                        syncZoomUi();
                         return true;
                     }
                 });
@@ -783,9 +776,19 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     /** 把相机当前的变焦值同步到焦距控制盘（捏合、切镜头、相机就绪时调用）。 */
     private void syncZoomUi() {
         if (zoomDial == null || cameraController == null) return;
-        float max = Math.min(100f, Math.max(1f, cameraController.maxZoom()));
-        zoomDial.setRange(1f, max);
+        float min = Math.max(0.1f, cameraController.minZoom());
+        zoomDial.setRange(min, 100f);
         zoomDial.setZoom(cameraController.getZoom());
+        if (renderer != null) renderer.setExtraZoom(cameraController.extraZoom());
+        updateZoomChip();
+    }
+
+    /** 统一入口：相机 + 渲染层软件放大 + 控制盘 + 收起后的小圆钮。 */
+    private void applyZoom(float z) {
+        if (cameraController == null) return;
+        cameraController.setZoom(z);
+        if (renderer != null) renderer.setExtraZoom(cameraController.extraZoom());
+        if (zoomDial != null) zoomDial.setZoom(cameraController.getZoom());
         updateZoomChip();
     }
 
@@ -793,7 +796,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (zoomChip == null || zoomDial == null) return;
         float z = zoomDial.getZoom();
         if (cameraController != null) z = cameraController.getZoom();
-        zoomChip.setText(String.format(Locale.US, "%.1f×", z));
+        zoomChip.setText(zoomLabel(z));
+    }
+
+    private String zoomLabel(float z) {
+        if (Math.abs(z - Math.rint(z)) < 0.05f) {
+            return String.format(Locale.US, "%.0f×", z);
+        }
+        return String.format(Locale.US, "%.1f×", z);
     }
 
     private void setZoomCollapsed(boolean collapsed) {
@@ -809,8 +819,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         zoomChip.setVisibility(zoomCollapsed ? View.VISIBLE : View.GONE);
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) zoomBox.getLayoutParams();
         if (lp != null) {
-            lp.width = dp(zoomCollapsed ? 50 : 128);
-            lp.height = dp(zoomCollapsed ? 50 : 152);
+            lp.width = dp(zoomCollapsed ? 50 : 148);
+            lp.height = dp(zoomCollapsed ? 50 : 148);
             zoomBox.setLayoutParams(lp);
         }
         updateZoomChip();
@@ -870,6 +880,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             float speed = (float) Math.sqrt(gx * gx + gy * gy + gz * gz);
             // 竖屏下：y 轴为左右转动，x 轴为俯仰，z 轴为滚转
             renderer.setMotion(gy, gx, gz, speed);
+            if (cameraController != null) cameraController.setMotionSpeed(speed);
         }
 
         @Override
@@ -1194,6 +1205,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         final StylePreset st = style;
         final float in = intensity;
         final boolean spr = spritesOn;
+        // 软件变焦部分（超过设备上限）在照片上也要按同样比例裁切
+        final float extra = cameraController != null ? cameraController.extraZoom() : 1f;
         // 非正常风格且开启了“保存原素材”：先把相机原始 JPEG 原样存一份
         final boolean saveRaw = saveOriginal && !st.normal;
         final AtomicBoolean cancel = new AtomicBoolean(false);
@@ -1210,14 +1223,24 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         dialog.show();
 
         worker.execute(() -> {
+            byte[] prepared = jpeg;
+            if (extra > 1.001f) {
+                try {
+                    prepared = GalleryProcessor.cropJpegCenter(jpeg, 1f / extra);
+                } catch (Throwable t) {
+                    Log.e(TAG, "crop zoom jpeg", t);
+                    prepared = jpeg;
+                }
+            }
+            final byte[] shot = prepared;
             if (saveRaw) {
                 try {
-                    GalleryProcessor.saveOriginalJpeg(this, jpeg);
+                    GalleryProcessor.saveOriginalJpeg(this, shot);
                 } catch (Throwable t) {
                     Log.e(TAG, "save original jpeg", t);
                 }
             }
-            GalleryProcessor.processJpegBytes(this, jpeg, st, in, spr, cancel,
+            GalleryProcessor.processJpegBytes(this, shot, st, in, spr, cancel,
                 new GalleryProcessor.Listener() {
                     @Override
                     public void onProgress(float p, String label) {
@@ -1816,7 +1839,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         list.setPadding(dp(12), dp(8), dp(12), dp(8));
 
         TextView tip = new TextView(this);
-        tip.setText("点一下使用 · 长按调整参数 · 改过的会记在本机");
+        tip.setText("点一下使用 · 长按调整参数 · 日常 / 自动场景为固定预设");
         tip.setTextColor(0xFF9AA0B2);
         tip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         tip.setPadding(dp(6), 0, dp(6), dp(8));
@@ -1840,8 +1863,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         edit.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         edit.setPadding(dp(12), dp(9), dp(12), dp(9));
         edit.setOnClickListener(v -> {
+            ScenePreset cur = curScene();
+            if (cur.special) {
+                toast(cur.name + " · " + cur.hint);
+                return;
+            }
             if (sceneDialog != null) sceneDialog.dismiss();
-            showSceneEditor(curScene(), false);
+            showSceneEditor(cur, false);
         });
         LinearLayout.LayoutParams editLp = new LinearLayout.LayoutParams(0, WRAP, 1f);
         editLp.setMargins(dp(4), dp(2), dp(4), dp(6));
@@ -1877,6 +1905,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             lp.setMargins(dp(4), dp(4), dp(4), dp(4));
             b.setOnClickListener(v -> selectScene(sp));
             b.setOnLongClickListener(v -> {
+                if (sp.special) {
+                    toast(sp.name + " · " + sp.hint);
+                    return true;
+                }
                 if (sceneDialog != null) sceneDialog.dismiss();
                 showSceneEditor(sp, false);
                 return true;
@@ -1907,6 +1939,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
      * 内置场景不能改名、可以恢复默认；自定义场景可改名、可删除。
      */
     private void showSceneEditor(ScenePreset base, boolean isNew) {
+        if (base != null && base.special) {
+            toast(base.name + " · " + base.hint);
+            return;
+        }
         final boolean custom = base != null && base.custom;
         final boolean builtin = base != null && !base.custom && !isNew;
 

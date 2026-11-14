@@ -10,14 +10,17 @@ import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.RggbChannelVector;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.util.Range;
 import android.util.Rational;
@@ -74,17 +77,31 @@ public class CameraController {
     private volatile boolean flashAvailable = false;
     private volatile boolean flashKnown = false;
 
-    // 数码变焦：用裁切区域实现，兼容到 API 24
+    // 数码变焦：用裁切区域实现，兼容到 API 24；API 30+ 优先用 CONTROL_ZOOM_RATIO
+    private volatile float minZoom = 1f;
     private volatile float maxZoom = 1f;
     private volatile float zoom = 1f;
     private volatile boolean zoomKnown = false;
+    private volatile boolean zoomRatioSupported = false;
+    private volatile float ratioMax = 1f;
     private android.graphics.Rect activeArray;
+    private final Runnable applyRepeatingRunnable = this::applyRepeating;
 
     // 点击对焦：AF/AE 测光区域
     private volatile boolean afAutoSupported = false;
     private volatile boolean afRegionsSupported = false;
     private volatile boolean aeRegionsSupported = false;
     private volatile android.hardware.camera2.params.MeteringRectangle focusRect;
+
+    // 自动场景：根据环境亮度和机身动静挑场景模式
+    private volatile float motionSpeed;
+    private volatile int lastIso;
+    private volatile long lastExposureNs;
+    private volatile int currentSceneMode = CaptureRequest.CONTROL_SCENE_MODE_DISABLED;
+    private long lastSceneSwitch;
+    private boolean autoSceneSupported = false;
+    private boolean sceneNight = false;
+    private boolean sceneAction = false;
 
     public CameraController(Context ctx) {
         manager = (CameraManager) ctx.getSystemService(Context.CAMERA_SERVICE);
@@ -205,14 +222,16 @@ public class CameraController {
 
     public void setParams(CaptureParams p) {
         params = p == null ? new CaptureParams() : p.copy();
-        handler.post(this::applyRepeating);
+        handler.removeCallbacks(applyRepeatingRunnable);
+        handler.post(applyRepeatingRunnable);
     }
 
     /** 切换闪光灯策略；video 为 true 时「常开」用常亮补光（手电筒模式）。 */
     public void setFlash(int mode, boolean video) {
         flashMode = mode;
         videoMode = video;
-        handler.post(this::applyRepeating);
+        handler.removeCallbacks(applyRepeatingRunnable);
+        handler.post(applyRepeatingRunnable);
     }
 
     public boolean hasFlash() {
@@ -232,23 +251,48 @@ public class CameraController {
         return maxZoom;
     }
 
+    /** 设备支持的最小倍数：支持多摄时可能是 0.5× 一类的广角。 */
+    public float minZoom() {
+        return minZoom;
+    }
+
     public float getZoom() {
         return zoom;
     }
 
-    /** 设置数码变焦倍数，1 表示不裁切。 */
+    /** 超过设备数码变焦上限后，由渲染层继续做软件裁切放大。 */
+    public float extraZoom() {
+        float hz = halZoom();
+        return hz > 0.0001f ? Math.max(1f, zoom / hz) : 1f;
+    }
+
+    private float halZoom() {
+        return Math.min(maxZoom, Math.max(minZoom, zoom));
+    }
+
+    /** 设置变焦倍数；界面量程 0.1×–100×，设备上限之外用软件裁切补足。 */
     public void setZoom(float ratio) {
-        float z = clamp(ratio, 1f, Math.max(1f, maxZoom));
+        float z = clamp(ratio, minZoom, 100f);
         if (Math.abs(z - zoom) < 0.005f) return;
+        float oldHal = halZoom();
         zoom = z;
-        handler.post(this::applyRepeating);
+        // 只改变软件放大时不必重建相机请求，拖动控制盘更跟手
+        if (Math.abs(halZoom() - oldHal) > 0.001f) {
+            handler.removeCallbacks(applyRepeatingRunnable);
+            handler.post(applyRepeatingRunnable);
+        }
+    }
+
+    /** 自动场景用来判断画面里有没有明显运动。 */
+    public void setMotionSpeed(float speed) {
+        motionSpeed = speed;
     }
 
     /** 当前数码变焦对应的传感器裁切区域。 */
     public android.graphics.Rect currentCropRect() {
         android.graphics.Rect aa = activeArray;
         if (aa == null) return new android.graphics.Rect(0, 0, 1, 1);
-        float z = zoom;
+        float z = halZoom();
         if (z <= 1.001f) return new android.graphics.Rect(aa);
         int cw = Math.max(1, Math.round(aa.width() / z));
         int ch = Math.max(1, Math.round(aa.height() / z));
@@ -288,6 +332,15 @@ public class CameraController {
         }
 
         android.graphics.Rect crop = currentCropRect();
+        // 超过设备上限的软件裁切也要算进可见范围
+        float extra = extraZoom();
+        if (extra > 1.001f) {
+            int ew = Math.max(1, Math.round(crop.width() / extra));
+            int eh = Math.max(1, Math.round(crop.height() / extra));
+            int el = crop.left + (crop.width() - ew) / 2;
+            int et = crop.top + (crop.height() - eh) / 2;
+            crop = new android.graphics.Rect(el, et, el + ew, et + eh);
+        }
         int px = crop.left + Math.round(sx * crop.width());
         int py = crop.top + Math.round(sy * crop.height());
         int size = Math.max(1, Math.round(Math.min(crop.width(), crop.height()) * 0.18f));
@@ -316,11 +369,11 @@ public class CameraController {
                 try {
                     session.capture(b.build(), null, handler);
                 } catch (Throwable t) {
-                    session.setRepeatingRequest(b.build(), null, handler);
+                    session.setRepeatingRequest(b.build(), previewCb, handler);
                 }
                 handler.postDelayed(this::applyRepeating, 1200);
             } else {
-                session.setRepeatingRequest(b.build(), null, handler);
+                session.setRepeatingRequest(b.build(), previewCb, handler);
             }
         } catch (Throwable t) {
             Log.w(TAG, "triggerFocus", t);
@@ -335,14 +388,23 @@ public class CameraController {
         afOffSupported = true;
         flashAvailable = false;
         flashKnown = false;
+        minZoom = 1f;
         maxZoom = 1f;
         zoom = 1f;
         zoomKnown = false;
+        zoomRatioSupported = false;
+        ratioMax = 1f;
         activeArray = null;
         focusRect = null;
         afAutoSupported = false;
         afRegionsSupported = false;
         aeRegionsSupported = false;
+        currentSceneMode = CaptureRequest.CONTROL_SCENE_MODE_DISABLED;
+        autoSceneSupported = false;
+        sceneNight = false;
+        sceneAction = false;
+        lastIso = 0;
+        lastExposureNs = 0;
         try {
             String id = findCameraId(facing);
             if (id == null) return;
@@ -353,9 +415,34 @@ public class CameraController {
             Boolean flash = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
             flashAvailable = flash != null && flash;
             flashKnown = true;
+            // 传统数码变焦上限，任何设备都有
+            float sm = 1f;
             Float mz = c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);
-            // 界面上限 100×；设备支持不到时由 setZoom 自动停在设备最大值
-            if (mz != null && mz > 1f) maxZoom = Math.min(100f, mz);
+            if (mz != null && mz > 1f) sm = Math.min(100f, mz);
+            // API 30+ 的逻辑多摄变焦比例，可覆盖广角（<1×）与长焦
+            float rl = 1f;
+            float ru = 1f;
+            boolean hasRatio = false;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Range<Float> zr = c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
+                if (zr != null) {
+                    hasRatio = true;
+                    rl = Math.max(0.1f, zr.getLower());
+                    ru = Math.max(rl, Math.min(100f, zr.getUpper()));
+                }
+            }
+            ratioMax = ru;
+            // 只有确实能改变视野（<1 广角或 >1 变焦）时才用变焦比例
+            zoomRatioSupported = hasRatio && (rl < 0.99f || ru > 1.01f);
+            if (zoomRatioSupported) {
+                minZoom = Math.min(1f, rl);
+                maxZoom = Math.max(ru, sm);
+            } else {
+                minZoom = 1f;
+                maxZoom = Math.max(ru, sm);
+            }
+            if (maxZoom < minZoom) maxZoom = minZoom;
+            zoom = Math.min(maxZoom, Math.max(minZoom, 1f));
             zoomKnown = true;
             activeArray = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
             Float md = c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
@@ -378,6 +465,14 @@ public class CameraController {
             afRegionsSupported = maxAf != null && maxAf > 0;
             Integer maxAe = c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE);
             aeRegionsSupported = maxAe != null && maxAe > 0;
+            int[] sceneModes = c.get(CameraCharacteristics.CONTROL_AVAILABLE_SCENE_MODES);
+            if (sceneModes != null) {
+                for (int m : sceneModes) {
+                    if (m == CaptureRequest.CONTROL_SCENE_MODE_NIGHT) sceneNight = true;
+                    if (m == CaptureRequest.CONTROL_SCENE_MODE_ACTION) sceneAction = true;
+                }
+            }
+            autoSceneSupported = sceneNight || sceneAction;
         } catch (Throwable t) {
             Log.w(TAG, "characteristics", t);
         }
@@ -470,7 +565,7 @@ public class CameraController {
                             }
                             session = s;
                             try {
-                                s.setRepeatingRequest(builder.build(), null, handler);
+                                s.setRepeatingRequest(builder.build(), previewCb, handler);
                                 mainHandler.post(listener::onOpened);
                             } catch (Throwable t) {
                                 postError(listener, "预览启动失败：" + t.getMessage());
@@ -656,14 +751,62 @@ public class CameraController {
             CaptureRequest.Builder b = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             b.addTarget(previewSurface);
             applyParams(b, false);
-            session.setRepeatingRequest(b.build(), null, handler);
+            session.setRepeatingRequest(b.build(), previewCb, handler);
         } catch (Throwable t) {
             Log.w(TAG, "applyRepeating", t);
         }
     }
 
+    /** 预览结果回调：记录亮度，并在自动场景下按需切换场景模式。 */
+    private final CameraCaptureSession.CaptureCallback previewCb =
+            new CameraCaptureSession.CaptureCallback() {
+                @Override
+                public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest request,
+                                               TotalCaptureResult result) {
+                    if (result == null) return;
+                    try {
+                        Integer iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
+                        Long exp = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+                        if (iso != null) lastIso = iso;
+                        if (exp != null) lastExposureNs = exp;
+                    } catch (Throwable ignored) {
+                    }
+                    if (!params.autoScene) return;
+                    long now = SystemClock.elapsedRealtime();
+                    if (now - lastSceneSwitch < 1200) return;
+                    int want = pickSceneMode();
+                    if (want != currentSceneMode) {
+                        lastSceneSwitch = now;
+                        handler.post(CameraController.this::applyRepeating);
+                    }
+                }
+            };
+
+    /** 暗光优先夜景，明显晃动优先运动，其余交给普通自动。 */
+    private int pickSceneMode() {
+        if (!autoSceneSupported) return CaptureRequest.CONTROL_SCENE_MODE_DISABLED;
+        boolean night = lastIso >= 1200 || lastExposureNs >= 80_000_000L;
+        boolean action = motionSpeed >= 3.5f;
+        if (night && sceneNight) return CaptureRequest.CONTROL_SCENE_MODE_NIGHT;
+        if (action && sceneAction) return CaptureRequest.CONTROL_SCENE_MODE_ACTION;
+        return CaptureRequest.CONTROL_SCENE_MODE_DISABLED;
+    }
+
     private void applyParams(CaptureRequest.Builder b, boolean forStill) {
         CaptureParams p = params;
+        // 自动场景：按亮度与动静让相机切换场景模式（夜景 / 运动 / 普通）
+        try {
+            int mode = p.autoScene ? pickSceneMode()
+                    : CaptureRequest.CONTROL_SCENE_MODE_DISABLED;
+            currentSceneMode = mode;
+            b.set(CaptureRequest.CONTROL_SCENE_MODE, mode);
+        } catch (Throwable t) {
+            try {
+                b.set(CaptureRequest.CONTROL_SCENE_MODE,
+                        CaptureRequest.CONTROL_SCENE_MODE_DISABLED);
+            } catch (Throwable ignored) {
+            }
+        }
         // 曝光（拍照时按闪光灯策略选择 AE 闪光模式）
         try {
             boolean stillFlash = forStill && flashAvailable;
@@ -760,14 +903,34 @@ public class CameraController {
         } catch (Throwable ignored) {
         }
         try {
-            if (activeArray != null && zoom > 1.001f) {
-                int cw = Math.max(1, Math.round(activeArray.width() / zoom));
-                int ch = Math.max(1, Math.round(activeArray.height() / zoom));
-                int left = activeArray.left + (activeArray.width() - cw) / 2;
-                int top = activeArray.top + (activeArray.height() - ch) / 2;
-                b.set(CaptureRequest.SCALER_CROP_REGION,
-                        new android.graphics.Rect(left, top, left + cw, top + ch));
+            float hz = halZoom();
+            // 变焦比例优先用于广角和比例范围内的变焦；超出比例范围再用传统裁切
+            boolean useRatio = zoomRatioSupported
+                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                    && (hz < 0.999f || hz <= ratioMax + 0.001f);
+            if (useRatio) {
+                try {
+                    b.set(CaptureRequest.CONTROL_ZOOM_RATIO, hz);
+                } catch (Throwable t) {
+                    applyCropZoom(b, hz);
+                }
+            } else {
+                applyCropZoom(b, hz);
             }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 老设备用 SCALER_CROP_REGION 做数码变焦。 */
+    private void applyCropZoom(CaptureRequest.Builder b, float z) {
+        if (activeArray == null || z <= 1.001f) return;
+        try {
+            int cw = Math.max(1, Math.round(activeArray.width() / z));
+            int ch = Math.max(1, Math.round(activeArray.height() / z));
+            int left = activeArray.left + (activeArray.width() - cw) / 2;
+            int top = activeArray.top + (activeArray.height() - ch) / 2;
+            b.set(CaptureRequest.SCALER_CROP_REGION,
+                    new android.graphics.Rect(left, top, left + cw, top + ch));
         } catch (Throwable ignored) {
         }
     }

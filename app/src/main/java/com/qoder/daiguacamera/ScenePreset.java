@@ -20,6 +20,10 @@ public class ScenePreset {
     public boolean custom;
     /** 内置场景被改过参数（* 标记，可恢复默认）。 */
     public boolean edited;
+    /** 日常 / 自动场景：固定语义，不参与参数编辑。 */
+    public boolean special;
+    /** 自动场景：交给相机按光线和动静自动挑参数。 */
+    public boolean autoDetect;
 
     public ScenePreset(String id, String name, String hint, boolean manual, int iso,
                        long exposureNs, float ev, int kelvin, boolean wbAuto,
@@ -57,6 +61,7 @@ public class ScenePreset {
         p.kelvin = kelvin;
         p.focusMode = focusMode;
         p.diopter = diopter;
+        p.autoScene = autoDetect;
         return p;
     }
 
@@ -65,6 +70,8 @@ public class ScenePreset {
                 wbAuto, focusMode, diopter);
         s.custom = custom;
         s.edited = edited;
+        s.special = special;
+        s.autoDetect = autoDetect;
         return s;
     }
 
@@ -95,7 +102,18 @@ public class ScenePreset {
         return null;
     }
 
+    /** 日常 / 自动场景：固定在前两个，不支持编辑参数。 */
+    private static ScenePreset special(String id, String name, String hint, boolean autoDetect) {
+        ScenePreset s = new ScenePreset(id, name, hint, false, 200, ns(1 / 125.0), 0f, 5200, true,
+                CaptureParams.FOCUS_AUTO, 0f);
+        s.special = true;
+        s.autoDetect = autoDetect;
+        return s;
+    }
+
     public static final ScenePreset[] ALL = {
+            special("daily", "日常", "普通拍摄：全自动，拿起就拍", false),
+            special("auto_scene", "自动场景", "自动识别光线和动静，匹配最合适的参数", true),
             // 光比大、需要压高光的风光
             new ScenePreset("sunrise", "日出", "低 ISO 压住太阳，暖白平衡", true, 100, ns(1 / 250.0), 0.3f, 4200, false, CaptureParams.FOCUS_INFINITY, 0f),
             new ScenePreset("sunset", "日落", "保留天空层次，稍欠曝", true, 100, ns(1 / 200.0), 0.5f, 4800, false, CaptureParams.FOCUS_INFINITY, 0f),
