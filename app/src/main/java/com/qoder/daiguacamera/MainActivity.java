@@ -37,6 +37,7 @@ import android.util.Size;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -140,6 +141,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private LinearLayout extraRow;
     private TextView extraSummary;
     private TextView extraActionBtn;
+    private TextView flashBtn;
+    private TextView zoomBadge;
+
+    // 闪光灯：自动 / 常开 / 常闭
+    private static final int FLASH_AUTO = 0;
+    private static final int FLASH_ON = 1;
+    private static final int FLASH_OFF = 2;
+    private static final String FLASH_ICON = "\u26A1\uFE0E";
+    private int flashMode = FLASH_AUTO;
+    private ScaleGestureDetector scaleDetector;
+    private float zoomStart = 1f;
+    private boolean pinching;
 
     // 相册卡通化
     private TextView galleryBtn;
@@ -190,6 +203,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         captureMode = prefs.getInt("captureMode", MODE_VIDEO);
         photoSub = prefs.getInt("photoSub", SUB_NORMAL);
         videoSub = prefs.getInt("videoSub", SUB_NORMAL);
+        flashMode = Math.max(FLASH_AUTO, Math.min(FLASH_OFF, prefs.getInt("flash", FLASH_AUTO)));
         proParams = loadProParams("pro_", true);
         videoProParams = loadProParams("vpro_", false);
         sceneStore = new SceneStore(this);
@@ -206,6 +220,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         buildUi();
         updateModeUi();
         applyCameraParams();
+        applyFlashState();
+        updateFlashUi();
 
         if (hasPerm(Manifest.permission.RECORD_AUDIO)) micAllowed = true;
         ensurePermissions();
@@ -275,8 +291,26 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         title.setTextColor(0xFFFFFFFF);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
         title.setShadowLayer(dp(5), 0, dp(2), 0xAA000000);
         topBar.addView(title, new LinearLayout.LayoutParams(0, WRAP, 1f));
+
+        flashBtn = new TextView(this);
+        flashBtn.setText(FLASH_ICON);
+        flashBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        flashBtn.setTextColor(0xFFFFFFFF);
+        flashBtn.setGravity(Gravity.CENTER);
+        GradientDrawable flashBg = new GradientDrawable();
+        flashBg.setShape(GradientDrawable.OVAL);
+        flashBg.setColor(0x40000000);
+        flashBg.setStroke(dp(1), 0x33FFFFFF);
+        flashBtn.setBackground(flashBg);
+        flashBtn.setContentDescription("闪光灯：自动");
+        flashBtn.setOnClickListener(v -> cycleFlash());
+        LinearLayout.LayoutParams flashLp = new LinearLayout.LayoutParams(dp(42), dp(42));
+        flashLp.rightMargin = dp(8);
+        topBar.addView(flashBtn, flashLp);
 
         galleryBtn = new TextView(this);
         galleryBtn.setText("相册");
@@ -382,6 +416,28 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         badgeLp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
         badgeLp.topMargin = dp(60);
         root.addView(recBadge, badgeLp);
+
+        // 变焦提示：平时隐藏，捏合放大时显示，点一下恢复 1 倍
+        zoomBadge = new TextView(this);
+        zoomBadge.setText("1.0×");
+        zoomBadge.setTextColor(0xFFFFFFFF);
+        zoomBadge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        zoomBadge.setTypeface(Typeface.MONOSPACE);
+        zoomBadge.setGravity(Gravity.CENTER);
+        GradientDrawable zoomBg = new GradientDrawable();
+        zoomBg.setCornerRadius(dp(20));
+        zoomBg.setColor(0x66000000);
+        zoomBg.setStroke(dp(1), 0x33FFFFFF);
+        zoomBadge.setBackground(zoomBg);
+        zoomBadge.setPadding(dp(10), dp(5), dp(10), dp(5));
+        zoomBadge.setVisibility(View.GONE);
+        zoomBadge.setContentDescription("变焦倍数，点击恢复 1 倍");
+        zoomBadge.setOnClickListener(v -> resetZoom());
+        FrameLayout.LayoutParams zoomLp = new FrameLayout.LayoutParams(WRAP, WRAP);
+        zoomLp.gravity = Gravity.TOP | Gravity.END;
+        zoomLp.topMargin = dp(60);
+        zoomLp.rightMargin = dp(16);
+        root.addView(zoomBadge, zoomLp);
 
         // 底部控制面板
         bottomPanel = new LinearLayout(this);
@@ -601,11 +657,52 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) recBadge.getLayoutParams();
             lp.topMargin = top + dp(56);
             recBadge.setLayoutParams(lp);
+            if (zoomBadge != null) {
+                FrameLayout.LayoutParams zlp = (FrameLayout.LayoutParams) zoomBadge.getLayoutParams();
+                zlp.topMargin = top + dp(56);
+                zoomBadge.setLayoutParams(zlp);
+            }
             return insets;
         });
 
+        // 双指捏合 / 张开调整数码变焦，拍照和录像都生效
+        scaleDetector = new ScaleGestureDetector(this,
+                new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                    @Override
+                    public boolean onScaleBegin(ScaleGestureDetector detector) {
+                        if (cameraController == null) return false;
+                        if (cameraController.maxZoom() <= 1.01f) {
+                            if (cameraController.isZoomKnown()) toast("这个摄像头不支持变焦");
+                            return false;
+                        }
+                        zoomStart = cameraController.getZoom();
+                        return true;
+                    }
+
+                    @Override
+                    public boolean onScale(ScaleGestureDetector detector) {
+                        if (cameraController == null) return true;
+                        cameraController.setZoom(zoomStart * detector.getScaleFactor());
+                        updateZoomBadge(cameraController.getZoom());
+                        return true;
+                    }
+                });
+
         // 触摸：给小精灵和周围卡通景物加反应（按钮区域会先消费事件）
         root.setOnTouchListener((v, e) -> {
+            if (scaleDetector != null) scaleDetector.onTouchEvent(e);
+            if (e.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN) {
+                pinching = true;
+                // 结束单指抚摸，避免小精灵跟着第二根手指漂移
+                renderer.onTouch(0.5f, 0.5f, 2);
+            }
+            if (pinching || e.getPointerCount() > 1) {
+                if (e.getActionMasked() == MotionEvent.ACTION_UP
+                        || e.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+                    pinching = false;
+                }
+                return true;
+            }
             float w = v.getWidth();
             float h = v.getHeight();
             if (w <= 0 || h <= 0) return false;
@@ -662,6 +759,75 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             spriteBtn.animate().alpha(spritesOn ? 1f : 0.38f).setDuration(150).start();
         }
         toast(spritesOn ? "小精灵：开（相机/拍照/相册都会出现）" : "小精灵：关");
+    }
+
+    // ------------------------------------------------------------------ 闪光灯 / 变焦
+
+    private void cycleFlash() {
+        if (cameraController != null && cameraController.isFlashKnown()
+                && !cameraController.hasFlash()) {
+            toast("这台相机没有闪光灯");
+            return;
+        }
+        flashMode = (flashMode + 1) % 3;
+        prefs.edit().putInt("flash", flashMode).apply();
+        applyFlashState();
+        updateFlashUi();
+        if (flashMode == FLASH_ON && captureMode == MODE_VIDEO) {
+            toast("闪光灯：常开（录像时持续补光）");
+        } else if (flashMode == FLASH_ON) {
+            toast("闪光灯：常开（拍照时每次都闪）");
+        } else if (flashMode == FLASH_AUTO) {
+            toast(captureMode == MODE_VIDEO
+                    ? "闪光灯：自动（录像不复位，需要补光请选常开）"
+                    : "闪光灯：自动（光线不足时自动闪）");
+        } else {
+            toast("闪光灯：常闭");
+        }
+    }
+
+    private void applyFlashState() {
+        if (cameraController != null) {
+            cameraController.setFlash(flashMode, captureMode == MODE_VIDEO);
+        }
+    }
+
+    private void updateFlashUi() {
+        if (flashBtn == null) return;
+        boolean known = cameraController != null && cameraController.isFlashKnown();
+        boolean supported = !known || cameraController.hasFlash();
+        String label = flashMode == FLASH_AUTO ? "自动" : (flashMode == FLASH_ON ? "常开" : "常闭");
+        flashBtn.setText(flashMode == FLASH_AUTO ? FLASH_ICON
+                : FLASH_ICON + (flashMode == FLASH_ON ? "开" : "关"));
+        flashBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, flashMode == FLASH_AUTO ? 17 : 11.5f);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.OVAL);
+        if (flashMode == FLASH_ON && supported) {
+            bg.setOrientation(GradientDrawable.Orientation.LEFT_RIGHT);
+            bg.setColors(new int[]{0xFFFF5C7A, 0xFFFF9A5C});
+        } else {
+            bg.setColor(0x40000000);
+            bg.setStroke(dp(1), 0x33FFFFFF);
+        }
+        flashBtn.setBackground(bg);
+        flashBtn.setAlpha(!supported ? 0.25f : (flashMode == FLASH_OFF ? 0.5f : 1f));
+        flashBtn.setContentDescription("闪光灯：" + label + (supported ? "" : "（不可用）"));
+    }
+
+    private void updateZoomBadge(float zoom) {
+        if (zoomBadge == null) return;
+        if (zoom <= 1.01f) {
+            zoomBadge.setVisibility(View.GONE);
+            return;
+        }
+        zoomBadge.setText(String.format(Locale.US, "%.1f×", zoom));
+        zoomBadge.setVisibility(View.VISIBLE);
+    }
+
+    private void resetZoom() {
+        if (cameraController == null) return;
+        cameraController.setZoom(1f);
+        updateZoomBadge(1f);
     }
 
     private final SensorEventListener motionListener = new SensorEventListener() {
@@ -1069,6 +1235,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         captureMode = mode;
         prefs.edit().putInt("captureMode", captureMode).apply();
         updateModeUi();
+        applyFlashState();
         applyCameraParams();
     }
 
@@ -1906,6 +2073,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         cameraController.open(facing, cameraSurface, new CameraController.Listener() {
             @Override
             public void onOpened() {
+                ui.post(() -> {
+                    updateFlashUi();
+                    applyFlashState();
+                    updateZoomBadge(cameraController.getZoom());
+                });
             }
 
             @Override

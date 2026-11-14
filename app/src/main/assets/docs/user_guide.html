@@ -32,13 +32,13 @@ strong { color: #ffffff; }
 </head>
 <body><main>
 <h1 id="呆瓜相机--操作手册">呆瓜相机 · 操作手册</h1>
-<p>适用版本：<strong>v1.11</strong>（versionCode 12）<br />
+<p>适用版本：<strong>v1.12</strong>（versionCode 13）<br />
 系统要求：Android 7.0 及以上<br />
 包名：<code>com.qoder.daiguacamera</code></p>
 <hr />
 <h2 id="1-安装与首次启动">1. 安装与首次启动</h2>
 <ol>
-<li>安装 <code>daigua-camera-v1.11.apk</code>。如果手机提示“未知来源”，允许当前文件管理器安装即可。</li>
+<li>安装 <code>daigua-camera-v1.12.apk</code>。如果手机提示“未知来源”，允许当前文件管理器安装即可。</li>
 <li>首次打开会申请 <strong>相机</strong> 和 <strong>麦克风</strong> 权限：
 <ul>
 <li>相机：必需，否则无法预览和拍摄。</li>
@@ -59,18 +59,22 @@ strong { color: #ffffff; }
 </thead>
 <tbody>
 <tr class="odd">
+<td>⚡</td>
+<td>闪光灯：自动 / 常开 / 常闭，点一下循环切换，默认自动</td>
+</tr>
+<tr class="even">
 <td>相册</td>
 <td>从系统相册选一张图片或一段视频，用当前风格处理</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>说明</td>
 <td>打开内置的操作手册与版本更新说明（离线可看）</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>✦</td>
 <td>小精灵开关（默认关闭）</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>⇄</td>
 <td>前置 / 后置摄像头切换（录像中不可用）</td>
 </tr>
@@ -83,6 +87,7 @@ strong { color: #ffffff; }
 <li><strong>第三层 · 风格</strong>：正常、卡通、漫画、水彩、素描、像素、霓虹。默认「正常」，与拍摄方式、模式互不影响。</li>
 <li><strong>风格强度</strong>：0%–100%，只对卡通类风格有效；「正常」下自动置灰。</li>
 <li><strong>参数行</strong>：专业模式显示参数摘要和「调整」；傻瓜模式显示当前场景和「换场景」。录像、拍照都会显示。</li>
+<li><strong>预览区</strong>：双指捏合 / 张开调整变焦，右上角显示当前倍数，点一下恢复 1 倍。</li>
 <li><strong>快门键</strong>：录像时是红色圆点，拍照时是白色圆点。</li>
 </ul>
 <hr />
@@ -166,7 +171,51 @@ strong { color: #ffffff; }
 </ul>
 <p>场景参数只影响曝光、白平衡、对焦，不改变卡通风格。</p>
 <hr />
-<h2 id="5-风格与强度">5. 风格与强度</h2>
+<h2 id="5-闪光灯与变焦">5. 闪光灯与变焦</h2>
+<h3 id="51-闪光灯">5.1 闪光灯</h3>
+<p>顶部 ⚡ 按钮循环切换 <strong>自动 → 常开 → 常闭</strong>，默认「自动」，选择会记在本机。</p>
+<table>
+<thead>
+<tr class="header">
+<th>状态</th>
+<th>拍照</th>
+<th>录像</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>自动</td>
+<td>光线不足时自动闪</td>
+<td>不闪（连续录像无法逐帧测光）</td>
+</tr>
+<tr class="even">
+<td>常开</td>
+<td>每次都闪</td>
+<td>变成常亮补光（手电筒）</td>
+</tr>
+<tr class="odd">
+<td>常闭</td>
+<td>完全关闭</td>
+<td>完全关闭</td>
+</tr>
+</tbody>
+</table>
+<p>说明：</p>
+<ul>
+<li>专业模式使用手动曝光（ISO 或快门选了固定值）时，「自动」没有测光依据；需要闪光请选「常开」。</li>
+<li>前置摄像头通常没有闪光灯，按钮会变暗，点击会提示不可用。</li>
+<li>录像「常开」会持续点亮闪光灯，机身发热、耗电增加属于正常现象。</li>
+</ul>
+<h3 id="52-变焦">5.2 变焦</h3>
+<p>在预览画面上用两根手指<strong>捏合或张开</strong>即可调整焦距（数码变焦），拍照和录像都生效。</p>
+<ul>
+<li>变焦后屏幕右上角显示当前倍数，例如 <code>2.0×</code>。</li>
+<li>点一下倍数标签，立即恢复 1 倍。</li>
+<li>变焦是数码裁切，倍数越大画面越软；切换前后摄像头会自动回到 1 倍。</li>
+<li>个别前置摄像头不支持变焦，捏合时会提示「这个摄像头不支持变焦」。</li>
+</ul>
+<hr />
+<h2 id="6-风格与强度">6. 风格与强度</h2>
 <table>
 <thead>
 <tr class="header">
@@ -207,7 +256,7 @@ strong { color: #ffffff; }
 </table>
 <p>「正常」模式下，预览、录像、拍照、相册处理都原样输出，只保留画面裁剪和前置镜像；此时风格强度滑块置灰。切回任意卡通风格后，强度立即恢复作用。</p>
 <hr />
-<h2 id="6-小精灵">6. 小精灵</h2>
+<h2 id="7-小精灵">7. 小精灵</h2>
 <ul>
 <li><strong>默认关闭</strong>。点顶部 ✦ 打开，再点关闭；按钮变暗表示关闭。</li>
 <li>打开后，小精灵会出现在实时预览、录像、拍照和相册处理结果里；关闭后全部不出现。</li>
@@ -216,7 +265,7 @@ strong { color: #ffffff; }
 </ul>
 <p>建议：想要干净的照片就保持关闭；想要“呆瓜”一点的效果再打开。</p>
 <hr />
-<h2 id="7-相册处理">7. 相册处理</h2>
+<h2 id="8-相册处理">8. 相册处理</h2>
 <ol>
 <li>点顶部「相册」，选择一张图片或一段视频。</li>
 <li>按当前的风格、强度和小精灵开关处理，弹窗显示进度，可随时取消。</li>
@@ -230,7 +279,7 @@ strong { color: #ffffff; }
 <li>处理视频会调用硬件编解码，机身发热、耗电属于正常现象。</li>
 </ul>
 <hr />
-<h2 id="8-保存位置">8. 保存位置</h2>
+<h2 id="9-保存位置">9. 保存位置</h2>
 <table>
 <thead>
 <tr class="header">
@@ -251,7 +300,7 @@ strong { color: #ffffff; }
 </table>
 <p>保存成功后会提示「已保存到相册 · …」。在系统相册的「相册」或「文件夹」里也能找到 <code>DaiguaCamera</code>。</p>
 <hr />
-<h2 id="9-常见问题">9. 常见问题</h2>
+<h2 id="10-常见问题">10. 常见问题</h2>
 <p><strong>预览黑屏 / 相机打不开</strong><br />
 检查是否授予相机权限；如果其他应用正在占用相机，先关闭它；仍不行时退出重进。</p>
 <p><strong>录像没有声音</strong><br />
@@ -262,14 +311,18 @@ Android 9 及以下需要存储权限；同时确认手机剩余空间充足。<
 应用会自动降级重试（关闭小精灵、降低分辨率）；如果相机原图始终拿不到，会改为保存当前预览画面并在弹窗中说明原因。</p>
 <p><strong>相册视频处理很久</strong><br />
 卡通化需要逐帧解码和重编码。只想保留原片时，把风格切到「正常」并关闭小精灵，会直接复制原视频。</p>
+<p><strong>闪光灯不亮</strong><br />
+先看顶部 ⚡ 是否是「常闭」；前置摄像头一般没有闪光灯；专业模式手动曝光时「自动」不会闪，请切到「常开」。</p>
+<p><strong>双指捏合不能变焦</strong><br />
+需要在预览画面上用两根手指操作，并且当前摄像头支持变焦；前置镜头常常不支持，切到后置再试。</p>
 <p><strong>换手机后设置没了</strong><br />
 风格、专业参数、场景等设置只保存在本机应用私有空间，卸载或换机不会同步。</p>
 <p><strong>想要更干净的画面</strong><br />
 风格选「正常」、关闭小精灵；需要更强效果时再提高卡通风格强度。</p>
 <hr />
-<h2 id="10-版本与反馈">10. 版本与反馈</h2>
+<h2 id="11-版本与反馈">11. 版本与反馈</h2>
 <ul>
-<li>当前版本：v1.11（versionCode 12）</li>
+<li>当前版本：v1.12（versionCode 13）</li>
 <li>内置文档：点顶部「说明」，可离线查看 <strong>操作手册</strong> 和 <strong>更新说明</strong>，内容随 APK 一起安装</li>
 <li>历史更新：<a href="changelog.html">CHANGELOG.md</a></li>
 <li>项目与下载：<a href="https://github.com/haoliying/daigua-camera">https://github.com/haoliying/daigua-camera</a></li>

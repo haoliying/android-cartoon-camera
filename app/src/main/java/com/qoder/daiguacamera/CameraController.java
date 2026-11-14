@@ -65,6 +65,21 @@ public class CameraController {
     private float maxDiopter = 10f;
     private boolean afOffSupported = true;
 
+    // 闪光灯：自动 / 常开 / 常闭
+    public static final int FLASH_AUTO = 0;
+    public static final int FLASH_ON = 1;
+    public static final int FLASH_OFF = 2;
+    private volatile int flashMode = FLASH_AUTO;
+    private volatile boolean videoMode = false;
+    private volatile boolean flashAvailable = false;
+    private volatile boolean flashKnown = false;
+
+    // 数码变焦：用裁切区域实现，兼容到 API 24
+    private volatile float maxZoom = 1f;
+    private volatile float zoom = 1f;
+    private volatile boolean zoomKnown = false;
+    private android.graphics.Rect activeArray;
+
     public CameraController(Context ctx) {
         manager = (CameraManager) ctx.getSystemService(Context.CAMERA_SERVICE);
         thread = new HandlerThread("camera2");
@@ -187,11 +202,53 @@ public class CameraController {
         handler.post(this::applyRepeating);
     }
 
+    /** 切换闪光灯策略；video 为 true 时「常开」用常亮补光（手电筒模式）。 */
+    public void setFlash(int mode, boolean video) {
+        flashMode = mode;
+        videoMode = video;
+        handler.post(this::applyRepeating);
+    }
+
+    public boolean hasFlash() {
+        return flashAvailable;
+    }
+
+    /** 相机参数是否已经读取过，用来区分「没有闪光灯」和「还没打开相机」。 */
+    public boolean isFlashKnown() {
+        return flashKnown;
+    }
+
+    public boolean isZoomKnown() {
+        return zoomKnown;
+    }
+
+    public float maxZoom() {
+        return maxZoom;
+    }
+
+    public float getZoom() {
+        return zoom;
+    }
+
+    /** 设置数码变焦倍数，1 表示不裁切。 */
+    public void setZoom(float ratio) {
+        float z = clamp(ratio, 1f, Math.max(1f, maxZoom));
+        if (Math.abs(z - zoom) < 0.005f) return;
+        zoom = z;
+        handler.post(this::applyRepeating);
+    }
+
     private void loadCharacteristics(int facing) {
         isoRange = null;
         expRange = null;
         evRange = null;
         afOffSupported = true;
+        flashAvailable = false;
+        flashKnown = false;
+        maxZoom = 1f;
+        zoom = 1f;
+        zoomKnown = false;
+        activeArray = null;
         try {
             String id = findCameraId(facing);
             if (id == null) return;
@@ -199,6 +256,13 @@ public class CameraController {
             isoRange = c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
             expRange = c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
             evRange = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
+            Boolean flash = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
+            flashAvailable = flash != null && flash;
+            flashKnown = true;
+            Float mz = c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);
+            if (mz != null && mz > 1f) maxZoom = Math.min(10f, mz);
+            zoomKnown = true;
+            activeArray = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
             Float md = c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
             if (md != null && md > 0f) maxDiopter = md;
             Rational step = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
@@ -397,6 +461,7 @@ public class CameraController {
                 b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO);
                 b.set(CaptureRequest.CONTROL_AF_MODE,
                         CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                applyFlashAndZoom(b, true);
                 try {
                     b.set(CaptureRequest.JPEG_QUALITY, (byte) 95);
                     b.set(CaptureRequest.JPEG_ORIENTATION, stillRotation);
@@ -499,14 +564,22 @@ public class CameraController {
 
     private void applyParams(CaptureRequest.Builder b, boolean forStill) {
         CaptureParams p = params;
-        // 曝光
+        // 曝光（拍照时按闪光灯策略选择 AE 闪光模式）
         try {
+            boolean stillFlash = forStill && flashAvailable;
+            int aeMode = CaptureRequest.CONTROL_AE_MODE_ON;
             if (p.manualExposure) {
-                b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+                aeMode = CaptureRequest.CONTROL_AE_MODE_OFF;
+            } else if (stillFlash && flashMode == FLASH_ON) {
+                aeMode = CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH;
+            } else if (stillFlash && flashMode == FLASH_AUTO) {
+                aeMode = CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH;
+            }
+            b.set(CaptureRequest.CONTROL_AE_MODE, aeMode);
+            if (p.manualExposure) {
                 b.set(CaptureRequest.SENSOR_SENSITIVITY, clampIso(p.iso));
                 b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, clampExposure(p.exposureNs, forStill));
             } else {
-                b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
                 b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, clampEv(p.ev));
             }
         } catch (Throwable t) {
@@ -546,6 +619,38 @@ public class CameraController {
                         CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
             } catch (Throwable ignored) {
             }
+        }
+        applyFlashAndZoom(b, forStill);
+    }
+
+    /** 闪光灯与数码变焦：两者都用同一个请求重建，预览/录像/拍照保持一致。 */
+    private void applyFlashAndZoom(CaptureRequest.Builder b, boolean forStill) {
+        try {
+            int fm = CaptureRequest.FLASH_MODE_OFF;
+            if (flashAvailable && flashMode != FLASH_OFF) {
+                if (forStill) {
+                    // 手动曝光时「自动」没有测光依据，只有「常开」才闪
+                    fm = (flashMode == FLASH_ON || !params.manualExposure)
+                            ? CaptureRequest.FLASH_MODE_SINGLE
+                            : CaptureRequest.FLASH_MODE_OFF;
+                } else if (videoMode && flashMode == FLASH_ON) {
+                    // 录像「常开」= 手电筒常亮；「自动」在连续录像里没有意义，保持关闭
+                    fm = CaptureRequest.FLASH_MODE_TORCH;
+                }
+            }
+            b.set(CaptureRequest.FLASH_MODE, fm);
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (activeArray != null && zoom > 1.001f) {
+                int cw = Math.max(1, Math.round(activeArray.width() / zoom));
+                int ch = Math.max(1, Math.round(activeArray.height() / zoom));
+                int left = activeArray.left + (activeArray.width() - cw) / 2;
+                int top = activeArray.top + (activeArray.height() - ch) / 2;
+                b.set(CaptureRequest.SCALER_CROP_REGION,
+                        new android.graphics.Rect(left, top, left + cw, top + ch));
+            }
+        } catch (Throwable ignored) {
         }
     }
 
