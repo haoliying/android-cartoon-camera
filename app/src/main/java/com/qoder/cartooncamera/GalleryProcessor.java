@@ -117,24 +117,65 @@ public class GalleryProcessor {
                                         float intensity, boolean sprites, AtomicBoolean cancel,
                                         Listener l) {
         try {
-            l.onProgress(0.05f, "读取照片…");
-            Bitmap src = decodeJpeg(jpeg);
+            runJpeg(ctx, jpeg, style, intensity, sprites, cancel, l,
+                    MAX_IMAGE_SIDE, MAX_OUTPUT_SIDE, true);
+            return;
+        } catch (Cancelled c) {
+            l.onError("已取消");
+            return;
+        } catch (Throwable t) {
+            Log.e(TAG, "photo failed, retrying smaller", t);
+        }
+        // 兜底：原图数据特殊、显存/内存吃紧或小精灵层出错时，降一档重来（这次不带小精灵）
+        try {
+            runJpeg(ctx, jpeg, style, intensity, false, cancel, l,
+                    MAX_IMAGE_SIDE / 2, MAX_OUTPUT_SIDE / 2, false);
+        } catch (Cancelled c) {
+            l.onError("已取消");
+        } catch (Throwable t) {
+            Log.e(TAG, "photo failed again", t);
+            String m = t.getMessage();
+            l.onError(m == null || m.isEmpty() ? "照片卡通化失败" : m);
+        }
+    }
+
+    private static void runJpeg(Context ctx, byte[] jpeg, StylePreset style, float intensity,
+                                boolean sprites, AtomicBoolean cancel, Listener l,
+                                int maxSide, int maxOut, boolean checkBlack) {
+        l.onProgress(0.05f, "读取照片…");
+        Bitmap src = decodeJpeg(jpeg, maxSide);
+        Bitmap out = null;
+        try {
             if (cancel.get()) throw new Cancelled();
             l.onProgress(0.3f, "卡通化…");
-            Bitmap out = renderImage(src, style, intensity, sprites);
-            src.recycle();
+            out = renderImage(src, style, intensity, sprites, maxOut);
             if (cancel.get()) throw new Cancelled();
+            if (checkBlack && isBlack(out)) {
+                throw new IllegalStateException("渲染结果是黑屏，正在降级重试");
+            }
             l.onProgress(0.85f, "保存到相册…");
             String where = saveBitmap(ctx, out);
             l.onProgress(1f, "完成");
             l.onDone(where, out);
-        } catch (Cancelled c) {
-            l.onError("已取消");
-        } catch (Throwable t) {
-            Log.e(TAG, "photo failed", t);
-            String m = t.getMessage();
-            l.onError(m == null || m.isEmpty() ? "处理照片失败" : m);
+            out = null;     // 交给界面显示预览
+        } finally {
+            src.recycle();
+            if (out != null) out.recycle();
         }
+    }
+
+    /** 防止空渲染：整张几乎全黑时视为失败，交给上层降级重试。 */
+    private static boolean isBlack(Bitmap b) {
+        int w = b.getWidth();
+        int h = b.getHeight();
+        int sx = Math.max(1, w / 8);
+        int sy = Math.max(1, h / 8);
+        for (int y = sy / 2; y < h; y += sy) {
+            for (int x = sx / 2; x < w; x += sx) {
+                if ((b.getPixel(x, y) & 0xFFFFFF) != 0) return false;
+            }
+        }
+        return true;
     }
 
     // ------------------------------------------------------------------ 图片
@@ -155,6 +196,10 @@ public class GalleryProcessor {
     }
 
     private static Bitmap decodeJpeg(byte[] jpeg) {
+        return decodeJpeg(jpeg, MAX_IMAGE_SIDE);
+    }
+
+    private static Bitmap decodeJpeg(byte[] jpeg, int maxSide) {
         try {
             BitmapFactory.Options bounds = new BitmapFactory.Options();
             bounds.inJustDecodeBounds = true;
@@ -163,7 +208,7 @@ public class GalleryProcessor {
                 throw new IllegalStateException("无法读取这张照片");
             }
             int sample = 1;
-            while (Math.max(bounds.outWidth, bounds.outHeight) / sample > MAX_IMAGE_SIDE) {
+            while (Math.max(bounds.outWidth, bounds.outHeight) / sample > maxSide) {
                 sample *= 2;
             }
             BitmapFactory.Options opt = new BitmapFactory.Options();
@@ -267,14 +312,19 @@ public class GalleryProcessor {
 
     private static Bitmap renderImage(Bitmap src, StylePreset style, float intensity,
                                      boolean spritesOn) {
+        return renderImage(src, style, intensity, spritesOn, MAX_OUTPUT_SIDE);
+    }
+
+    private static Bitmap renderImage(Bitmap src, StylePreset style, float intensity,
+                                     boolean spritesOn, int maxOut) {
         int sw = src.getWidth();
         int sh = src.getHeight();
-        float scale = Math.min(1f, MAX_OUTPUT_SIDE / (float) Math.max(sw, sh));
+        float scale = Math.min(1f, maxOut / (float) Math.max(sw, sh));
         int ow = Math.max(2, Math.round(sw * scale));
         int oh = Math.max(2, Math.round(sh * scale));
         OfflineGl gl = new OfflineGl();
-        gl.init();
         try {
+            gl.init();
             return gl.renderImage(src, ow, oh, style, intensity, spritesOn);
         } finally {
             gl.release();
@@ -484,7 +534,7 @@ public class GalleryProcessor {
             muxer = null;
 
             l.onProgress(0.98f, "写入相册…");
-            String where = saveVideoFile(ctx, tmp, "Cartoon_" + timestamp() + ".mp4");
+            String where = saveVideoFile(ctx, tmp, "Daigua_" + timestamp() + ".mp4");
             //noinspection ResultOfMethodCallIgnored
             tmp.delete();
             tmp = null;
@@ -630,15 +680,20 @@ public class GalleryProcessor {
 
     // ------------------------------------------------------------------ 保存
 
+    /** 已卡通化的画布直接存相册（预览画面兜底用）。 */
+    public static String saveToGallery(Context ctx, Bitmap bmp) {
+        return saveBitmap(ctx, bmp);
+    }
+
     private static String saveBitmap(Context ctx, Bitmap bmp) {
-        String name = "Cartoon_" + timestamp() + ".jpg";
+        String name = "Daigua_" + timestamp() + ".jpg";
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 ContentValues v = new ContentValues();
                 v.put(MediaStore.Images.Media.DISPLAY_NAME, name);
                 v.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
                 v.put(MediaStore.Images.Media.RELATIVE_PATH,
-                        Environment.DIRECTORY_PICTURES + "/CartoonCamera");
+                        Environment.DIRECTORY_PICTURES + "/DaiguaCamera");
                 v.put(MediaStore.Images.Media.IS_PENDING, 1);
                 ContentResolver cr = ctx.getContentResolver();
                 Uri uri = cr.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
@@ -652,7 +707,7 @@ public class GalleryProcessor {
                 cr.update(uri, v, null, null);
             } else {
                 File dir = new File(Environment.getExternalStoragePublicDirectory(
-                        Environment.DIRECTORY_PICTURES), "CartoonCamera");
+                        Environment.DIRECTORY_PICTURES), "DaiguaCamera");
                 if (!dir.exists() && !dir.mkdirs()) throw new IllegalStateException("无法创建保存目录");
                 File f = new File(dir, name);
                 try (OutputStream out = new FileOutputStream(f)) {
@@ -660,7 +715,7 @@ public class GalleryProcessor {
                 }
                 MediaScannerConnection.scanFile(ctx, new String[]{f.getAbsolutePath()}, null, null);
             }
-            return "已保存到相册 · Pictures/CartoonCamera";
+            return "已保存到相册 · Pictures/DaiguaCamera";
         } catch (Throwable t) {
             Log.e(TAG, "saveBitmap", t);
             throw new IllegalStateException(t.getMessage() == null ? "保存图片失败" : t.getMessage());
@@ -674,7 +729,7 @@ public class GalleryProcessor {
                 v.put(MediaStore.Video.Media.DISPLAY_NAME, name);
                 v.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4");
                 v.put(MediaStore.Video.Media.RELATIVE_PATH,
-                        Environment.DIRECTORY_MOVIES + "/CartoonCamera");
+                        Environment.DIRECTORY_MOVIES + "/DaiguaCamera");
                 v.put(MediaStore.Video.Media.IS_PENDING, 1);
                 ContentResolver cr = ctx.getContentResolver();
                 Uri uri = cr.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, v);
@@ -688,7 +743,7 @@ public class GalleryProcessor {
                 cr.update(uri, v, null, null);
             } else {
                 File dir = new File(Environment.getExternalStoragePublicDirectory(
-                        Environment.DIRECTORY_MOVIES), "CartoonCamera");
+                        Environment.DIRECTORY_MOVIES), "DaiguaCamera");
                 if (!dir.exists() && !dir.mkdirs()) throw new IllegalStateException("无法创建保存目录");
                 File dst = new File(dir, name);
                 try (FileOutputStream out = new FileOutputStream(dst)) {
@@ -696,7 +751,7 @@ public class GalleryProcessor {
                 }
                 MediaScannerConnection.scanFile(ctx, new String[]{dst.getAbsolutePath()}, null, null);
             }
-            return "已保存到相册 · Movies/CartoonCamera";
+            return "已保存到相册 · Movies/DaiguaCamera";
         } catch (Throwable t) {
             Log.e(TAG, "saveVideoFile", t);
             throw new IllegalStateException(t.getMessage() == null ? "保存视频失败" : t.getMessage());
@@ -1007,15 +1062,14 @@ public class GalleryProcessor {
                 drawQuad(pf);
 
                 if (spritesOn) {
-                    // 照片里的小精灵：先按画面内容选址，再模拟 2.4 秒让它们出场、淡入、站稳
-                    ensureSpriteLayer();
-                    readContentGrid(true);   // 会把 FBO 解绑，画完精灵前要重新绑回输出缓冲
-                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outFbo);
-                    GLES20.glViewport(0, 0, ow, oh);
-                    for (int i = 0; i < 72; i++) {
-                        updateSprites(1f / 30f);
+                    // 小精灵只是锦上添花：万一这一层出问题，也不能连累整张照片
+                    try {
+                        drawSpriteOverlay(outFbo, ow, oh);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "sprite overlay skipped", t);
+                        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outFbo);
+                        GLES20.glViewport(0, 0, ow, oh);
                     }
-                    drawSprites(ow, oh);
                 }
                 Bitmap result = readPixels(ow, oh);
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
@@ -1026,6 +1080,18 @@ public class GalleryProcessor {
                 GLES20.glDeleteTextures(1, new int[]{outTex}, 0);
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
             }
+        }
+
+        private void drawSpriteOverlay(int outFbo, int ow, int oh) {
+            // 先按画面内容选址，再模拟 2.4 秒让它们出场、淡入、站稳
+            ensureSpriteLayer();
+            readContentGrid(true);   // 会把 FBO 解绑，画完精灵前要重新绑回输出缓冲
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, outFbo);
+            GLES20.glViewport(0, 0, ow, oh);
+            for (int i = 0; i < 72; i++) {
+                updateSprites(1f / 30f);
+            }
+            drawSprites(ow, oh);
         }
 
         private int uploadTexture(Bitmap bmp) {
@@ -1296,6 +1362,13 @@ public class GalleryProcessor {
         }
 
         void release() {
+            if (display == EGL14.EGL_NO_DISPLAY) {
+                // init 中途失败：没有有效的 display，直接清标记即可
+                context = EGL14.EGL_NO_CONTEXT;
+                pbuffer = EGL14.EGL_NO_SURFACE;
+                encoderSurface = EGL14.EGL_NO_SURFACE;
+                return;
+            }
             if (cameraHolder != null) {
                 cameraHolder.release();
                 cameraHolder = null;
@@ -1328,10 +1401,9 @@ public class GalleryProcessor {
                 EGL14.eglDestroyContext(display, context);
                 context = EGL14.EGL_NO_CONTEXT;
             }
-            if (display != EGL14.EGL_NO_DISPLAY) {
-                EGL14.eglTerminate(display);
-                display = EGL14.EGL_NO_DISPLAY;
-            }
+            // 不要 eglTerminate：EGLDisplay 是进程共享的，相机预览的 GL 线程还在用同一个
+            // display，终止它会把预览上下文一起废掉（表现为预览黑屏/卡死）。
+            display = EGL14.EGL_NO_DISPLAY;
         }
     }
 

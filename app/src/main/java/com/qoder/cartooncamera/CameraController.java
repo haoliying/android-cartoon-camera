@@ -8,6 +8,7 @@ import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.RggbChannelVector;
@@ -19,6 +20,7 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.util.Log;
 import android.util.Range;
+import android.util.Rational;
 import android.util.Size;
 import android.view.Surface;
 
@@ -54,10 +56,13 @@ public class CameraController {
     private int stillRotation = 90;
     private volatile Consumer<byte[]> jpegSink;
     private Runnable jpegTimeout;
+    private boolean stillRetried;
     private volatile CaptureParams params = new CaptureParams();
     private Range<Integer> isoRange;
     private Range<Long> expRange;
     private Range<Integer> evRange;
+    private float evStep = 1f;
+    private float maxDiopter = 10f;
     private boolean afOffSupported = true;
 
     public CameraController(Context ctx) {
@@ -194,6 +199,12 @@ public class CameraController {
             isoRange = c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
             expRange = c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
             evRange = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
+            Float md = c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
+            if (md != null && md > 0f) maxDiopter = md;
+            Rational step = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
+            if (step != null && step.getDenominator() != 0) {
+                evStep = Math.max(0.01f, step.floatValue());
+            }
             Integer so = c.get(CameraCharacteristics.SENSOR_ORIENTATION);
             stillRotation = so == null ? 90 : so;
             afOffSupported = false;
@@ -322,49 +333,127 @@ public class CameraController {
                 mainHandler.post(() -> onError.accept("相机还没准备好，稍后再试"));
                 return;
             }
+            if (jpegSink != null) {
+                mainHandler.post(() -> onError.accept("上一张还没拍完，请稍候"));
+                return;
+            }
+            jpegSink = onJpeg;
+            stillRetried = false;
+            startJpegTimeout(onError);
             try {
-                jpegSink = onJpeg;
-                if (jpegTimeout != null) handler.removeCallbacks(jpegTimeout);
-                jpegTimeout = () -> {
-                    Consumer<byte[]> sink = jpegSink;
-                    jpegSink = null;
-                    if (sink != null) mainHandler.post(() -> onError.accept("拍照超时，请重试"));
-                    applyRepeating();
-                };
-                handler.postDelayed(jpegTimeout, 12_000);
-
                 session.stopRepeating();
                 CaptureRequest.Builder b = device.createCaptureRequest(
                         CameraDevice.TEMPLATE_STILL_CAPTURE);
                 b.addTarget(stillSurface);
-                if (previewSurface != null) b.addTarget(previewSurface);
                 applyParams(b, true);
+                try {
+                    b.set(CaptureRequest.JPEG_QUALITY, (byte) 95);
+                } catch (Throwable ignored) {
+                }
                 try {
                     b.set(CaptureRequest.JPEG_ORIENTATION, stillRotation);
                 } catch (Throwable ignored) {
                 }
-                session.capture(b.build(), new CameraCaptureSession.CaptureCallback() {
-                    @Override
-                    public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest request,
-                                                   TotalCaptureResult result) {
-                        handler.post(() -> {
-                            if (jpegSink == null && jpegTimeout != null) {
-                                handler.removeCallbacks(jpegTimeout);
-                                jpegTimeout = null;
-                            }
-                            applyRepeating();
-                        });
-                    }
-                }, handler);
+                session.capture(b.build(), new Cb(onError, false), handler);
             } catch (Throwable t) {
-                Log.e(TAG, "captureStill", t);
-                jpegSink = null;
-                if (jpegTimeout != null) handler.removeCallbacks(jpegTimeout);
-                jpegTimeout = null;
-                mainHandler.post(() -> onError.accept("拍照失败：" + t.getMessage()));
-                applyRepeating();
+                // 某些机型会拒绝手动参数组合，直接退到全自动再拍一次
+                Log.w(TAG, "captureStill rejected, retry auto", t);
+                retryStillAuto(onError);
             }
         });
+    }
+
+    private void startJpegTimeout(Consumer<String> onError) {
+        if (jpegTimeout != null) handler.removeCallbacks(jpegTimeout);
+        jpegTimeout = () -> {
+            if (!stillRetried && jpegSink != null) {
+                Log.w(TAG, "still capture timeout, retry auto");
+                retryStillAuto(onError);
+                return;
+            }
+            Consumer<byte[]> sink = jpegSink;
+            jpegSink = null;
+            if (sink != null) mainHandler.post(() -> onError.accept("拍照超时，请重试"));
+            applyRepeating();
+        };
+        handler.postDelayed(jpegTimeout, 12_000);
+    }
+
+    /** 手动参数被设备拒绝时的兜底：全自动、无手动项，保证能出图。 */
+    private void retryStillAuto(Consumer<String> onError) {
+        handler.post(() -> {
+            if (jpegSink == null) return;
+            stillRetried = true;
+            startJpegTimeout(onError);
+            try {
+                if (session == null || device == null || stillSurface == null) {
+                    throw new IllegalStateException("相机未就绪");
+                }
+                session.stopRepeating();
+                CaptureRequest.Builder b = device.createCaptureRequest(
+                        CameraDevice.TEMPLATE_STILL_CAPTURE);
+                b.addTarget(stillSurface);
+                b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+                b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO);
+                b.set(CaptureRequest.CONTROL_AF_MODE,
+                        CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                try {
+                    b.set(CaptureRequest.JPEG_QUALITY, (byte) 95);
+                    b.set(CaptureRequest.JPEG_ORIENTATION, stillRotation);
+                } catch (Throwable ignored) {
+                }
+                session.capture(b.build(), new Cb(onError, true), handler);
+            } catch (Throwable t) {
+                Log.e(TAG, "retryStillAuto", t);
+                failStill(onError, "拍照失败：" + t.getMessage());
+            }
+        });
+    }
+
+    private void failStill(Consumer<String> onError, String message) {
+        handler.post(() -> {
+            Consumer<byte[]> sink = jpegSink;
+            jpegSink = null;
+            if (jpegTimeout != null) {
+                handler.removeCallbacks(jpegTimeout);
+                jpegTimeout = null;
+            }
+            if (sink != null) mainHandler.post(() -> onError.accept(message));
+            applyRepeating();
+        });
+    }
+
+    private final class Cb extends CameraCaptureSession.CaptureCallback {
+        private final Consumer<String> onError;
+        private final boolean auto;
+
+        Cb(Consumer<String> onError, boolean auto) {
+            this.onError = onError;
+            this.auto = auto;
+        }
+
+        @Override
+        public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest request,
+                                       TotalCaptureResult result) {
+            handler.post(() -> {
+                if (jpegSink == null && jpegTimeout != null) {
+                    handler.removeCallbacks(jpegTimeout);
+                    jpegTimeout = null;
+                }
+                applyRepeating();
+            });
+        }
+
+        @Override
+        public void onCaptureFailed(CameraCaptureSession s, CaptureRequest request,
+                                    CaptureFailure failure) {
+            Log.w(TAG, "still capture failed, reason=" + failure.getReason() + " auto=" + auto);
+            if (!auto) {
+                retryStillAuto(onError);
+            } else {
+                failStill(onError, "拍照失败，请重试");
+            }
+        }
     }
 
     private void onJpegReady(ImageReader reader) {
@@ -375,6 +464,7 @@ public class CameraController {
             ByteBuffer buf = img.getPlanes()[0].getBuffer();
             byte[] data = new byte[buf.remaining()];
             buf.get(data);
+            Log.i(TAG, "jpeg received " + data.length + " bytes");
             Consumer<byte[]> sink = jpegSink;
             jpegSink = null;
             if (jpegTimeout != null) {
@@ -464,9 +554,10 @@ public class CameraController {
             case CaptureParams.FOCUS_INFINITY:
                 return 0f;
             case CaptureParams.FOCUS_MACRO:
-                return clamp(p.diopter <= 0f ? 8f : p.diopter, 0f, 10f);
+                return clamp(p.diopter <= 0f ? Math.min(8f, maxDiopter) : p.diopter,
+                        0f, maxDiopter);
             case CaptureParams.FOCUS_MANUAL:
-                return clamp(p.diopter, 0f, 10f);
+                return clamp(p.diopter, 0f, maxDiopter);
             default:
                 return 0f;
         }
@@ -486,10 +577,10 @@ public class CameraController {
         return Math.max(1_000L, v);
     }
 
+    /** 把 EV 换算成设备支持的补偿档位（多数机型是 1/3 或 1/10 档）。 */
     private int clampEv(float ev) {
-        if (evRange == null) return Math.round(ev);
-        float step = 1f;
-        int i = Math.round(ev);
+        if (evRange == null) return 0;
+        int i = Math.round(ev / evStep);
         return Math.max(evRange.getLower(), Math.min(evRange.getUpper(), i));
     }
 

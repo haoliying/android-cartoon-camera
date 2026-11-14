@@ -64,6 +64,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final int REQ_PERMS = 21;
     private static final int REQ_PICK = 31;
     private static final int REQ_WRITE = 32;
+    private static final int REQ_WRITE_PHOTO = 33;
     private static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
 
@@ -131,6 +132,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private AtomicBoolean processingCancel;
     private boolean processing;
     private Uri pendingGalleryUri;
+    private boolean pendingPhoto;
+    private boolean previewFallbackBusy;
 
     private MediaRecorder recorder;
     private boolean recording = false;
@@ -251,7 +254,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         topBar.addView(dot, dotLp);
 
         TextView title = new TextView(this);
-        title.setText("卡通相机");
+        title.setText("呆瓜相机");
         title.setTextColor(0xFFFFFFFF);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -648,6 +651,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             toast("相机还没准备好");
             return;
         }
+        // Android 9 及以下写公共目录需要存储权限，否则保存一定会失败
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
+                && !hasPerm(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+            pendingPhoto = true;
+            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                    REQ_WRITE_PHOTO);
+            return;
+        }
         capturing = true;
         updateShutterBusy();
         recordInner.animate().scaleX(0.8f).scaleY(0.8f).setDuration(90)
@@ -657,7 +668,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 msg -> ui.post(() -> {
                     capturing = false;
                     updateShutterBusy();
-                    toast(msg);
+                    fallbackPreviewPhoto(msg);
                 }));
     }
 
@@ -671,6 +682,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         final float in = intensity;
         final boolean spr = spritesOn;
         final AtomicBoolean cancel = new AtomicBoolean(false);
+        processing = true;
         processingCancel = cancel;
 
         final AlertDialog dialog = new AlertDialog.Builder(this)
@@ -697,6 +709,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     public void onDone(String message, Bitmap preview) {
                         ui.post(() -> {
                             dismissProgress();
+                            processing = false;
                             processingCancel = null;
                             capturing = false;
                             updateShutterBusy();
@@ -710,13 +723,80 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     public void onError(String message) {
                         ui.post(() -> {
                             dismissProgress();
+                            processing = false;
                             processingCancel = null;
                             capturing = false;
                             updateShutterBusy();
-                            if (!isFinishing() && !isDestroyed()) toast(message);
+                            if (!isFinishing() && !isDestroyed()) showPhotoError(message);
                         });
                     }
                 }));
+    }
+
+    /**
+     * 相机原图没拿到（超时/被机型拒绝/JPEG 丢失）时的兜底：
+     * 直接把此刻已经卡通化的预览画面存进相册，至少不会让用户白按一次快门。
+     */
+    private void fallbackPreviewPhoto(String reason) {
+        if (previewFallbackBusy || processing) {
+            toast(reason);
+            return;
+        }
+        if (renderer == null || isFinishing() || isDestroyed()) {
+            toast(reason);
+            return;
+        }
+        previewFallbackBusy = true;
+        processing = true;
+        toast(reason + "，先保存当前预览画面");
+        renderer.capturePreviewFrame(new CartoonRenderer.FrameGrabCallback() {
+            @Override
+            public void onFrame(Bitmap frame) {
+                worker.execute(() -> {
+                    try {
+                        String where = GalleryProcessor.saveToGallery(MainActivity.this, frame);
+                        ui.post(() -> {
+                            previewFallbackBusy = false;
+                            processing = false;
+                            if (isFinishing() || isDestroyed()) {
+                                frame.recycle();
+                                return;
+                            }
+                            showPreview(where + "（相机原图不可用，已保存预览画面）", frame);
+                        });
+                    } catch (Throwable t) {
+                        frame.recycle();
+                        ui.post(() -> {
+                            previewFallbackBusy = false;
+                            processing = false;
+                            toast("保存预览画面失败：" + t.getMessage());
+                        });
+                    }
+                });
+            }
+
+            @Override
+            public void onFailed() {
+                ui.post(() -> {
+                    previewFallbackBusy = false;
+                    processing = false;
+                    toast(reason);
+                });
+            }
+        });
+    }
+
+    private void showPhotoError(String message) {
+        try {
+            new AlertDialog.Builder(this)
+                    .setTitle("照片卡通化失败")
+                    .setMessage(message + "\n\n已自动降级重试过（关闭小精灵、降低分辨率）。"
+                            + "如果仍然失败，请把这段提示反馈给我。")
+                    .setPositiveButton("知道了", null)
+                    .show();
+        } catch (Throwable t) {
+            toast(message);
+        }
     }
 
     // ------------------------------------------------------------------ 拍摄模式
@@ -1196,6 +1276,17 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_WRITE_PHOTO) {
+            boolean granted = hasPerm(Manifest.permission.WRITE_EXTERNAL_STORAGE);
+            boolean go = pendingPhoto;
+            pendingPhoto = false;
+            if (granted) {
+                if (go) takePhoto();
+            } else {
+                toast("没有存储权限，无法保存照片");
+            }
+            return;
+        }
         if (requestCode == REQ_WRITE) {
             Uri uri = pendingGalleryUri;
             pendingGalleryUri = null;
@@ -1213,7 +1304,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         } else {
             new AlertDialog.Builder(this)
                     .setTitle("需要相机权限")
-                    .setMessage("开启相机权限后才能使用卡通相机。")
+                    .setMessage("开启相机权限后才能使用呆瓜相机。")
                     .setPositiveButton("去设置", (d, w) -> {
                         Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
                         i.setData(Uri.parse("package:" + getPackageName()));
@@ -1535,14 +1626,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private OutputTarget createOutput() throws Exception {
-        String name = "Cartoon_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".mp4";
+        String name = "Daigua_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".mp4";
         OutputTarget out = new OutputTarget();
         out.name = name;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ContentValues v = new ContentValues();
             v.put(MediaStore.Video.Media.DISPLAY_NAME, name);
             v.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4");
-            v.put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/CartoonCamera");
+            v.put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/DaiguaCamera");
             v.put(MediaStore.Video.Media.IS_PENDING, 1);
             ContentResolver cr = getContentResolver();
             Uri uri = cr.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, v);
@@ -1551,7 +1642,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             out.pfd = cr.openFileDescriptor(uri, "w");
             if (out.pfd == null) throw new Exception("无法写入视频文件");
         } else {
-            File dir = new File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "CartoonCamera");
+            File dir = new File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "DaiguaCamera");
             if (!dir.exists() && !dir.mkdirs()) throw new Exception("无法创建保存目录");
             out.file = new File(dir, name);
         }
@@ -1567,7 +1658,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 ContentValues v = new ContentValues();
                 v.put(MediaStore.Video.Media.IS_PENDING, 0);
                 getContentResolver().update(out.uri, v, null, null);
-                toast("已保存到相册 · Movies/CartoonCamera");
+                toast("已保存到相册 · Movies/DaiguaCamera");
             } else if (out.file != null) {
                 MediaScannerConnection.scanFile(this, new String[]{out.file.getAbsolutePath()}, null, null);
                 toast("已保存：" + out.name);

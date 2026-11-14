@@ -1,5 +1,6 @@
 package com.qoder.cartooncamera;
 
+import android.graphics.Bitmap;
 import android.graphics.SurfaceTexture;
 import android.opengl.EGL14;
 import android.opengl.EGLConfig;
@@ -44,6 +45,21 @@ public class CartoonRenderer {
         void onError(String message);
     }
 
+    /** 抓取当前预览画面（相机原图拿不到时兜底存图）。 */
+    public interface FrameGrabCallback {
+        void onFrame(Bitmap frame);
+
+        void onFailed();
+    }
+
+    private static final class FrameGrab {
+        final FrameGrabCallback cb;
+
+        FrameGrab(FrameGrabCallback cb) {
+            this.cb = cb;
+        }
+    }
+
     private HandlerThread thread;
     private Handler handler;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -85,6 +101,7 @@ public class CartoonRenderer {
     private volatile boolean mirror = false;
 
     private final Runnable frameRunnable = this::renderFrame;
+    private volatile FrameGrab pendingGrab;
 
     public void setErrorListener(ErrorListener listener) {
         this.errorListener = listener;
@@ -113,6 +130,62 @@ public class CartoonRenderer {
         motPitch = pitch;
         motRoll = roll;
         motSpeed = speed;
+    }
+
+    /** 在 GL 线程抓一帧已经卡通化的预览画面。 */
+    public void capturePreviewFrame(FrameGrabCallback cb) {
+        if (cb == null) return;
+        final FrameGrab g = new FrameGrab(cb);
+        pendingGrab = g;
+        Handler h = handler;
+        if (h == null) {
+            pendingGrab = null;
+            mainHandler.post(cb::onFailed);
+            return;
+        }
+        h.post(this::grabFrameNow);
+    }
+
+    private void grabFrameNow() {
+        FrameGrab g = pendingGrab;
+        if (g == null) return;
+        if (cameraTexture == null || previewSurface == EGL14.EGL_NO_SURFACE
+                || previewW <= 0 || previewH <= 0) {
+            pendingGrab = null;
+            mainHandler.post(g.cb::onFailed);
+            return;
+        }
+        // 没有新帧也能抓：用最后一张相机纹理重新画一遍
+        renderFrame();
+        if (pendingGrab != null) {
+            pendingGrab = null;
+            mainHandler.post(g.cb::onFailed);
+        }
+    }
+
+    private Bitmap readPreviewPixels(int w, int h) {
+        try {
+            ByteBuffer buf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder());
+            GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf);
+            buf.position(0);
+            Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            int[] row = new int[w];
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    int i = (y * w + x) * 4;
+                    int r = buf.get(i) & 0xFF;
+                    int gg = buf.get(i + 1) & 0xFF;
+                    int b = buf.get(i + 2) & 0xFF;
+                    int a = buf.get(i + 3) & 0xFF;
+                    row[x] = (a << 24) | (r << 16) | (gg << 8) | b;
+                }
+                out.setPixels(row, 0, w, 0, h - 1 - y, w, 1);
+            }
+            return out;
+        } catch (Throwable t) {
+            Log.e(TAG, "readPreviewPixels", t);
+            return null;
+        }
     }
 
     /** 触摸：u,v 为屏幕比例坐标（v 向上），action 0 按下 1 移动 2 抬起。 */
@@ -643,6 +716,16 @@ public class CartoonRenderer {
         drawQuad(p);
 
         drawSprites(vw, vh);
+
+        if (target == previewSurface && pendingGrab != null) {
+            final FrameGrab g = pendingGrab;
+            pendingGrab = null;
+            final Bitmap shot = readPreviewPixels(vw, vh);
+            mainHandler.post(() -> {
+                if (shot != null) g.cb.onFrame(shot);
+                else g.cb.onFailed();
+            });
+        }
 
         EGL14.eglSwapBuffers(eglDisplay, target);
     }

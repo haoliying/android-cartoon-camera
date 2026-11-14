@@ -20,7 +20,7 @@ echo "[2/7] 链接资源与清单"
   --manifest "$ROOT/app/src/main/AndroidManifest.xml" \
   --java "$OUT/gen" \
   --min-sdk-version 24 --target-sdk-version 34 \
-  --version-code 6 --version-name 1.5 \
+  --version-code 7 --version-name 1.6 \
   "$OUT/res.zip"
 
 echo "[3/7] 编译 Java"
@@ -61,7 +61,7 @@ if [ ! -f "$KS" ]; then
     -dname "CN=Android Debug,O=Android,C=US"
 fi
 "$BT/apksigner" sign --ks "$KS" --ks-pass pass:android --key-pass pass:android \
-  --out "$ROOT/cartoon-camera.apk" "$OUT/aligned.apk"
-"$BT/apksigner" verify --print-certs "$ROOT/cartoon-camera.apk" | head -3
+  --out "$ROOT/daigua-camera.apk" "$OUT/aligned.apk"
+"$BT/apksigner" verify --print-certs "$ROOT/daigua-camera.apk" | head -3
 
-echo "APK: $ROOT/cartoon-camera.apk"
+echo "APK: $ROOT/daigua-camera.apk"
