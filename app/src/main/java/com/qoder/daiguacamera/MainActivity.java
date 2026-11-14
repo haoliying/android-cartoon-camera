@@ -19,7 +19,12 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.database.Cursor;
 import android.hardware.camera2.CameraCharacteristics;
+import android.media.ExifInterface;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
+import android.media.MediaMetadataRetriever;
 import android.media.MediaRecorder;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
@@ -31,6 +36,7 @@ import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.provider.MediaStore;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.util.Log;
 import android.util.Size;
@@ -58,6 +64,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
+import java.io.InputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -73,6 +80,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final int REQ_PICK = 31;
     private static final int REQ_WRITE = 32;
     private static final int REQ_WRITE_PHOTO = 33;
+    private static final int REQ_PICK_SCENE = 34;
     private static final String DOC_GUIDE = "file:///android_asset/docs/user_guide.html";
     private static final String DOC_LOG = "file:///android_asset/docs/changelog.html";
     private static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT;
@@ -139,10 +147,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private TextView videoPill, photoPill;
     private TextView subNormalPill, subProPill, subIdiotPill;
     private LinearLayout extraRow;
-    private TextView extraSummary;
     private TextView extraActionBtn;
     private TextView flashBtn;
-    private TextView zoomBadge;
+    private TextView styleBtn;
+    private ZoomSlider zoomSlider;
 
     // 闪光灯：自动 / 常开 / 常闭
     private static final int FLASH_AUTO = 0;
@@ -282,97 +290,32 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         dotBg.setShape(GradientDrawable.OVAL);
         dotBg.setColor(0xFFFF5C7A);
         dot.setBackground(dotBg);
-        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(8), dp(8));
-        dotLp.rightMargin = dp(8);
+        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(7), dp(7));
+        dotLp.rightMargin = dp(10);
+        dotLp.leftMargin = dp(2);
         topBar.addView(dot, dotLp);
 
-        TextView title = new TextView(this);
-        title.setText("呆瓜相机");
-        title.setTextColor(0xFFFFFFFF);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setSingleLine(true);
-        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        title.setShadowLayer(dp(5), 0, dp(2), 0xAA000000);
-        topBar.addView(title, new LinearLayout.LayoutParams(0, WRAP, 1f));
-
-        flashBtn = new TextView(this);
-        flashBtn.setText(FLASH_ICON);
-        flashBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-        flashBtn.setTextColor(0xFFFFFFFF);
-        flashBtn.setGravity(Gravity.CENTER);
-        GradientDrawable flashBg = new GradientDrawable();
-        flashBg.setShape(GradientDrawable.OVAL);
-        flashBg.setColor(0x40000000);
-        flashBg.setStroke(dp(1), 0x33FFFFFF);
-        flashBtn.setBackground(flashBg);
+        flashBtn = circleButton(FLASH_ICON, 17, 40);
         flashBtn.setContentDescription("闪光灯：自动");
         flashBtn.setOnClickListener(v -> cycleFlash());
-        LinearLayout.LayoutParams flashLp = new LinearLayout.LayoutParams(dp(42), dp(42));
-        flashLp.rightMargin = dp(8);
+        LinearLayout.LayoutParams flashLp = new LinearLayout.LayoutParams(dp(40), dp(40));
         topBar.addView(flashBtn, flashLp);
 
-        galleryBtn = new TextView(this);
-        galleryBtn.setText("相册");
-        galleryBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        galleryBtn.setTextColor(0xFFFFFFFF);
-        galleryBtn.setGravity(Gravity.CENTER);
-        GradientDrawable galleryBg = new GradientDrawable();
-        galleryBg.setShape(GradientDrawable.OVAL);
-        galleryBg.setColor(0x40000000);
-        galleryBg.setStroke(dp(1), 0x33FFFFFF);
-        galleryBtn.setBackground(galleryBg);
-        galleryBtn.setContentDescription("相册卡通化");
-        galleryBtn.setOnClickListener(v -> pickFromGallery());
-        LinearLayout.LayoutParams galleryLp = new LinearLayout.LayoutParams(dp(42), dp(42));
-        galleryLp.rightMargin = dp(8);
-        topBar.addView(galleryBtn, galleryLp);
+        View topSpacer = new View(this);
+        topBar.addView(topSpacer, new LinearLayout.LayoutParams(0, dp(1), 1f));
 
-        TextView docsBtn = new TextView(this);
-        docsBtn.setText("说明");
-        docsBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        docsBtn.setTextColor(0xFFFFFFFF);
-        docsBtn.setGravity(Gravity.CENTER);
-        GradientDrawable docsBg = new GradientDrawable();
-        docsBg.setShape(GradientDrawable.OVAL);
-        docsBg.setColor(0x40000000);
-        docsBg.setStroke(dp(1), 0x33FFFFFF);
-        docsBtn.setBackground(docsBg);
+        TextView docsBtn = circleButton("说明", 11, 40);
         docsBtn.setContentDescription("操作手册与版本更新说明");
         docsBtn.setOnClickListener(v -> showDocsDialog());
-        LinearLayout.LayoutParams docsLp = new LinearLayout.LayoutParams(dp(42), dp(42));
+        LinearLayout.LayoutParams docsLp = new LinearLayout.LayoutParams(dp(40), dp(40));
         docsLp.rightMargin = dp(8);
         topBar.addView(docsBtn, docsLp);
 
-        spriteBtn = new TextView(this);
-        spriteBtn.setText("✦");
-        spriteBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
-        spriteBtn.setTextColor(0xFFFFFFFF);
-        spriteBtn.setGravity(Gravity.CENTER);
-        GradientDrawable spriteBg = new GradientDrawable();
-        spriteBg.setShape(GradientDrawable.OVAL);
-        spriteBg.setColor(0x40000000);
-        spriteBg.setStroke(dp(1), 0x33FFFFFF);
-        spriteBtn.setBackground(spriteBg);
+        spriteBtn = circleButton("✦", 17, 40);
         spriteBtn.setAlpha(spritesOn ? 1f : 0.38f);
         spriteBtn.setContentDescription("小精灵开关");
         spriteBtn.setOnClickListener(v -> toggleSprites());
-        LinearLayout.LayoutParams spriteLp = new LinearLayout.LayoutParams(dp(42), dp(42));
-        spriteLp.rightMargin = dp(8);
-        topBar.addView(spriteBtn, spriteLp);
-
-        flipBtn = new TextView(this);
-        flipBtn.setText("⇄");
-        flipBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
-        flipBtn.setTextColor(0xFFFFFFFF);
-        flipBtn.setGravity(Gravity.CENTER);
-        GradientDrawable flipBg = new GradientDrawable();
-        flipBg.setShape(GradientDrawable.OVAL);
-        flipBg.setColor(0x40000000);
-        flipBg.setStroke(dp(1), 0x33FFFFFF);
-        flipBtn.setBackground(flipBg);
-        flipBtn.setOnClickListener(v -> flipCamera());
-        topBar.addView(flipBtn, new LinearLayout.LayoutParams(dp(42), dp(42)));
+        topBar.addView(spriteBtn, new LinearLayout.LayoutParams(dp(40), dp(40)));
 
         FrameLayout.LayoutParams topLp = new FrameLayout.LayoutParams(MATCH, WRAP);
         topLp.gravity = Gravity.TOP;
@@ -417,212 +360,110 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         badgeLp.topMargin = dp(60);
         root.addView(recBadge, badgeLp);
 
-        // 变焦提示：平时隐藏，捏合放大时显示，点一下恢复 1 倍
-        zoomBadge = new TextView(this);
-        zoomBadge.setText("1.0×");
-        zoomBadge.setTextColor(0xFFFFFFFF);
-        zoomBadge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        zoomBadge.setTypeface(Typeface.MONOSPACE);
-        zoomBadge.setGravity(Gravity.CENTER);
-        GradientDrawable zoomBg = new GradientDrawable();
-        zoomBg.setCornerRadius(dp(20));
-        zoomBg.setColor(0x66000000);
-        zoomBg.setStroke(dp(1), 0x33FFFFFF);
-        zoomBadge.setBackground(zoomBg);
-        zoomBadge.setPadding(dp(10), dp(5), dp(10), dp(5));
-        zoomBadge.setVisibility(View.GONE);
-        zoomBadge.setContentDescription("变焦倍数，点击恢复 1 倍");
-        zoomBadge.setOnClickListener(v -> resetZoom());
-        FrameLayout.LayoutParams zoomLp = new FrameLayout.LayoutParams(WRAP, WRAP);
+        // 右侧竖直播变焦条：看得见、拖得动，和双指捏合共用同一个变焦值
+        zoomSlider = new ZoomSlider(this);
+        zoomSlider.setListener((zoom, fromUser) -> {
+            if (cameraController != null) cameraController.setZoom(zoom);
+        });
+        FrameLayout.LayoutParams zoomLp = new FrameLayout.LayoutParams(dp(52), dp(216));
         zoomLp.gravity = Gravity.TOP | Gravity.END;
-        zoomLp.topMargin = dp(60);
-        zoomLp.rightMargin = dp(16);
-        root.addView(zoomBadge, zoomLp);
+        zoomLp.topMargin = dp(64);
+        zoomLp.rightMargin = dp(8);
+        root.addView(zoomSlider, zoomLp);
 
-        // 底部控制面板
+        // 底部控制面板：深色圆角卡片，只保留三层核心选择
         bottomPanel = new LinearLayout(this);
         bottomPanel.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable panelBg = new GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
-                new int[]{0xF007070B, 0x0007070B});
+        GradientDrawable panelBg = new GradientDrawable();
+        panelBg.setColor(0xF20B0B10);
+        panelBg.setCornerRadii(new float[]{dp(26), dp(26), dp(26), dp(26), 0, 0, 0, 0});
+        panelBg.setStroke(dp(1), 0x1FFFFFFF);
         bottomPanel.setBackground(panelBg);
-        bottomPanel.setPadding(0, dp(26), 0, dp(10));
+        bottomPanel.setPadding(dp(16), dp(14), dp(16), dp(8));
 
-        // 第一层：录像 / 拍照（大号分段控件，和下面两层明显区分）
-        LinearLayout segRow = new LinearLayout(this);
-        segRow.setOrientation(LinearLayout.HORIZONTAL);
-        segRow.setGravity(Gravity.CENTER);
-
+        // 第一层：录像 / 拍照（通栏分段控件）
         LinearLayout captureSeg = new LinearLayout(this);
         captureSeg.setOrientation(LinearLayout.HORIZONTAL);
         GradientDrawable segBg = new GradientDrawable();
-        segBg.setColor(0x1FFFFFFF);
-        segBg.setCornerRadius(dp(23));
-        segBg.setStroke(dp(1), 0x3DFFFFFF);
+        segBg.setColor(0x14FFFFFF);
+        segBg.setCornerRadius(dp(21));
         captureSeg.setBackground(segBg);
         captureSeg.setPadding(dp(4), dp(4), dp(4), dp(4));
 
         videoPill = segment("录像", true);
         videoPill.setOnClickListener(v -> setCaptureMode(MODE_VIDEO));
-        captureSeg.addView(videoPill, new LinearLayout.LayoutParams(0, dp(36), 1f));
+        captureSeg.addView(videoPill, new LinearLayout.LayoutParams(0, dp(34), 1f));
 
         photoPill = segment("拍照", false);
         photoPill.setOnClickListener(v -> setCaptureMode(MODE_PHOTO));
-        LinearLayout.LayoutParams photoSegLp = new LinearLayout.LayoutParams(0, dp(36), 1f);
+        LinearLayout.LayoutParams photoSegLp = new LinearLayout.LayoutParams(0, dp(34), 1f);
         photoSegLp.leftMargin = dp(4);
         captureSeg.addView(photoPill, photoSegLp);
+        bottomPanel.addView(captureSeg, new LinearLayout.LayoutParams(MATCH, WRAP));
 
-        LinearLayout.LayoutParams segLp = new LinearLayout.LayoutParams(dp(212), WRAP);
-        segRow.addView(captureSeg, segLp);
-        LinearLayout.LayoutParams segRowLp = new LinearLayout.LayoutParams(MATCH, WRAP);
-        segRowLp.bottomMargin = dp(7);
-        bottomPanel.addView(segRow, segRowLp);
-
-        // 第二层：模式（普通 / 专业 / 傻瓜），录像和拍照共用
+        // 第二层：普通 / 专业 / 傻瓜（录像和拍照共用）
         LinearLayout subRow = new LinearLayout(this);
         subRow.setOrientation(LinearLayout.HORIZONTAL);
-        subRow.setGravity(Gravity.CENTER_VERTICAL);
-        subRow.setPadding(dp(20), 0, dp(12), dp(2));
+        subRow.setPadding(0, dp(6), 0, 0);
 
-        TextView subLabel = new TextView(this);
-        subLabel.setText("模式");
-        subLabel.setTextColor(0xFF8F94A6);
-        subLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        subLabel.setTypeface(Typeface.DEFAULT_BOLD);
-        LinearLayout.LayoutParams subLabelLp = new LinearLayout.LayoutParams(WRAP, WRAP);
-        subLabelLp.rightMargin = dp(10);
-        subRow.addView(subLabel, subLabelLp);
-
-        subNormalPill = pill("普通", true);
+        subNormalPill = modeTab("普通", true);
         subNormalPill.setOnClickListener(v -> setSub(SUB_NORMAL));
-        addPill(subRow, subNormalPill);
+        subRow.addView(subNormalPill, new LinearLayout.LayoutParams(0, WRAP, 1f));
 
-        subProPill = pill("专业", false);
+        subProPill = modeTab("专业", false);
         subProPill.setOnClickListener(v -> setSub(SUB_PRO));
-        addPill(subRow, subProPill);
+        subRow.addView(subProPill, new LinearLayout.LayoutParams(0, WRAP, 1f));
 
-        subIdiotPill = pill("傻瓜", false);
+        subIdiotPill = modeTab("傻瓜", false);
         subIdiotPill.setOnClickListener(v -> setSub(SUB_IDIOT));
-        addPill(subRow, subIdiotPill);
+        subRow.addView(subIdiotPill, new LinearLayout.LayoutParams(0, WRAP, 1f));
 
         bottomPanel.addView(subRow, new LinearLayout.LayoutParams(MATCH, WRAP));
 
-        // 第三层：风格（卡通滤镜，独立于拍摄模式和模式）
-        LinearLayout styleWrap = new LinearLayout(this);
-        styleWrap.setOrientation(LinearLayout.HORIZONTAL);
-        styleWrap.setGravity(Gravity.CENTER_VERTICAL);
-        styleWrap.setPadding(dp(20), dp(5), 0, dp(2));
-
-        TextView styleLabel = new TextView(this);
-        styleLabel.setText("风格");
-        styleLabel.setTextColor(0xFF8F94A6);
-        styleLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        styleLabel.setTypeface(Typeface.DEFAULT_BOLD);
-        LinearLayout.LayoutParams styleLabelLp = new LinearLayout.LayoutParams(WRAP, WRAP);
-        styleLabelLp.rightMargin = dp(10);
-        styleWrap.addView(styleLabel, styleLabelLp);
-
-        HorizontalScrollView styleScroll = new HorizontalScrollView(this);
-        styleScroll.setHorizontalScrollBarEnabled(false);
-        LinearLayout styleRow = new LinearLayout(this);
-        styleRow.setOrientation(LinearLayout.HORIZONTAL);
-        styleRow.setPadding(0, 0, dp(8), dp(2));
-        styleScroll.addView(styleRow, new HorizontalScrollView.LayoutParams(WRAP, WRAP));
-
-        for (final StylePreset p : StylePreset.ALL) {
-            TextView chip = new TextView(this);
-            chip.setText(p.name);
-            chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-            chip.setGravity(Gravity.CENTER);
-            chip.setPadding(dp(14), dp(7), dp(14), dp(8));
-            LinearLayout.LayoutParams chipLp = new LinearLayout.LayoutParams(WRAP, WRAP);
-            chipLp.rightMargin = dp(8);
-            chip.setLayoutParams(chipLp);
-            chip.setBackground(chipBg(p == style));
-            chip.setTextColor(p == style ? 0xFFFFFFFF : 0xFFE9EAF2);
-            if (p == style) chip.setTypeface(Typeface.DEFAULT_BOLD);
-            chip.setOnClickListener(v -> selectStyle(p));
-            chips.add(chip);
-            styleRow.addView(chip);
-        }
-        styleWrap.addView(styleScroll, new LinearLayout.LayoutParams(0, WRAP, 1f));
-        bottomPanel.addView(styleWrap, new LinearLayout.LayoutParams(MATCH, WRAP));
-
-        LinearLayout sliderRow = new LinearLayout(this);
-        sliderRow.setOrientation(LinearLayout.HORIZONTAL);
-        sliderRow.setGravity(Gravity.CENTER_VERTICAL);
-        sliderRow.setPadding(dp(20), dp(10), dp(20), dp(2));
-
-        TextView sliderLabel = new TextView(this);
-        sliderLabel.setText("风格强度");
-        sliderLabel.setTextColor(0xFFC9CCD8);
-        sliderLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-        sliderRow.addView(sliderLabel, new LinearLayout.LayoutParams(WRAP, WRAP));
-
-        intensityBar = new SeekBar(this);
-        intensityBar.setMax(1000);
-        intensityBar.setProgress((int) (intensity * 1000));
-        intensityBar.setProgressTintList(android.content.res.ColorStateList.valueOf(0xFFFF5C7A));
-        intensityBar.setThumbTintList(android.content.res.ColorStateList.valueOf(0xFFFF5C7A));
-        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(0, WRAP, 1f);
-        barLp.leftMargin = dp(12);
-        barLp.rightMargin = dp(12);
-        sliderRow.addView(intensityBar, barLp);
-
-        intensityValue = new TextView(this);
-        intensityValue.setText(Math.round(intensity * 100) + "%");
-        intensityValue.setTextColor(0xFFC9CCD8);
-        intensityValue.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-        intensityValue.setTypeface(Typeface.MONOSPACE);
-        sliderRow.addView(intensityValue, new LinearLayout.LayoutParams(dp(38), WRAP));
-
-        intensityBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                intensity = progress / 1000f;
-                intensityValue.setText(Math.round(intensity * 100) + "%");
-                renderer.setStyle(style, intensity);
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {
-                prefs.edit().putFloat("intensity", intensity).apply();
-            }
-        });
-        bottomPanel.addView(sliderRow, new LinearLayout.LayoutParams(MATCH, WRAP));
-        updateIntensityEnabled();
-
-        // 专业参数摘要 / 傻瓜场景摘要
+        // 第三层：风格 + 参数/场景入口
         extraRow = new LinearLayout(this);
         extraRow.setOrientation(LinearLayout.HORIZONTAL);
         extraRow.setGravity(Gravity.CENTER_VERTICAL);
-        extraRow.setPadding(dp(20), 0, dp(20), dp(2));
-        extraRow.setVisibility(View.GONE);
+        extraRow.setPadding(0, dp(8), 0, 0);
 
-        extraSummary = new TextView(this);
-        extraSummary.setTextColor(0xFFB9BDCC);
-        extraSummary.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        extraSummary.setSingleLine(true);
-        extraSummary.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        extraRow.addView(extraSummary, new LinearLayout.LayoutParams(0, WRAP, 1f));
+        styleBtn = pill("风格 · " + style.name + " ▾", false);
+        styleBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        styleBtn.setPadding(dp(12), dp(5), dp(12), dp(6));
+        styleBtn.setContentDescription("选择卡通风格与强度");
+        styleBtn.setSingleLine(true);
+        styleBtn.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        styleBtn.setMaxWidth(dp(116));
+        styleBtn.setOnClickListener(v -> showStyleDialog());
+        extraRow.addView(styleBtn, new LinearLayout.LayoutParams(WRAP, WRAP));
 
-        extraActionBtn = pill("调整", false);
+        View extraSpacer = new View(this);
+        extraRow.addView(extraSpacer, new LinearLayout.LayoutParams(0, dp(1), 1f));
+
+        extraActionBtn = pill("参数 ▾", false);
         extraActionBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        extraActionBtn.setPadding(dp(14), dp(5), dp(14), dp(6));
+        extraActionBtn.setPadding(dp(12), dp(5), dp(12), dp(6));
+        extraActionBtn.setSingleLine(true);
+        extraActionBtn.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        extraActionBtn.setMaxWidth(dp(168));
         extraActionBtn.setOnClickListener(v -> onExtraAction());
-        LinearLayout.LayoutParams extraBtnLp = new LinearLayout.LayoutParams(WRAP, WRAP);
-        extraBtnLp.leftMargin = dp(10);
-        extraRow.addView(extraActionBtn, extraBtnLp);
+        extraActionBtn.setVisibility(View.GONE);
+        extraRow.addView(extraActionBtn, new LinearLayout.LayoutParams(WRAP, WRAP));
 
         bottomPanel.addView(extraRow, new LinearLayout.LayoutParams(MATCH, WRAP));
 
+        // 快门行：相册在左，快门居中，切换镜头在右
         LinearLayout recordRow = new LinearLayout(this);
         recordRow.setOrientation(LinearLayout.HORIZONTAL);
-        recordRow.setGravity(Gravity.CENTER);
-        recordRow.setPadding(0, dp(6), 0, dp(4));
+        recordRow.setGravity(Gravity.CENTER_VERTICAL);
+        recordRow.setPadding(0, dp(10), 0, 0);
+
+        galleryBtn = circleButton("相册", 10.5f, 46);
+        galleryBtn.setContentDescription("相册卡通化");
+        galleryBtn.setOnClickListener(v -> pickFromGallery());
+        recordRow.addView(galleryBtn, new LinearLayout.LayoutParams(dp(46), dp(46)));
+
+        View leftSpacer = new View(this);
+        recordRow.addView(leftSpacer, new LinearLayout.LayoutParams(0, dp(1), 1f));
 
         recordBtn = new FrameLayout(this);
         GradientDrawable ring = new GradientDrawable();
@@ -638,11 +479,19 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         innerBg.setShape(GradientDrawable.OVAL);
         innerBg.setColor(0xFFFF3B5C);
         recordInner.setBackground(innerBg);
-        FrameLayout.LayoutParams innerLp = new FrameLayout.LayoutParams(dp(60), dp(60));
+        FrameLayout.LayoutParams innerLp = new FrameLayout.LayoutParams(dp(58), dp(58));
         innerLp.gravity = Gravity.CENTER;
         recordBtn.addView(recordInner, innerLp);
+        recordRow.addView(recordBtn, new LinearLayout.LayoutParams(dp(76), dp(76)));
 
-        recordRow.addView(recordBtn, new LinearLayout.LayoutParams(dp(78), dp(78)));
+        View rightSpacer = new View(this);
+        recordRow.addView(rightSpacer, new LinearLayout.LayoutParams(0, dp(1), 1f));
+
+        flipBtn = circleButton("⇄", 20, 46);
+        flipBtn.setContentDescription("切换前后摄像头");
+        flipBtn.setOnClickListener(v -> flipCamera());
+        recordRow.addView(flipBtn, new LinearLayout.LayoutParams(dp(46), dp(46)));
+
         bottomPanel.addView(recordRow, new LinearLayout.LayoutParams(MATCH, WRAP));
 
         FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(MATCH, WRAP);
@@ -653,14 +502,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             int top = insets.getSystemWindowInsetTop();
             int bottom = insets.getSystemWindowInsetBottom();
             topBar.setPadding(dp(16), top + dp(8), dp(16), dp(6));
-            bottomPanel.setPadding(0, dp(26), 0, bottom + dp(10));
+            bottomPanel.setPadding(dp(16), dp(14), dp(16), bottom + dp(10));
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) recBadge.getLayoutParams();
             lp.topMargin = top + dp(56);
             recBadge.setLayoutParams(lp);
-            if (zoomBadge != null) {
-                FrameLayout.LayoutParams zlp = (FrameLayout.LayoutParams) zoomBadge.getLayoutParams();
-                zlp.topMargin = top + dp(56);
-                zoomBadge.setLayoutParams(zlp);
+            if (zoomSlider != null) {
+                FrameLayout.LayoutParams zlp = (FrameLayout.LayoutParams) zoomSlider.getLayoutParams();
+                zlp.topMargin = top + dp(64);
+                zoomSlider.setLayoutParams(zlp);
             }
             return insets;
         });
@@ -682,8 +531,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     @Override
                     public boolean onScale(ScaleGestureDetector detector) {
                         if (cameraController == null) return true;
-                        cameraController.setZoom(zoomStart * detector.getScaleFactor());
-                        updateZoomBadge(cameraController.getZoom());
+                        // getScaleFactor() 是“相对上一次事件”的增量，必须累乘，
+                        // 直接拿起始值相乘会导致倍数来回跳、捏合不跟手。
+                        zoomStart *= detector.getScaleFactor();
+                        cameraController.setZoom(zoomStart);
+                        zoomStart = cameraController.getZoom();
+                        syncZoomUi();
                         return true;
                     }
                 });
@@ -814,20 +667,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         flashBtn.setContentDescription("闪光灯：" + label + (supported ? "" : "（不可用）"));
     }
 
-    private void updateZoomBadge(float zoom) {
-        if (zoomBadge == null) return;
-        if (zoom <= 1.01f) {
-            zoomBadge.setVisibility(View.GONE);
-            return;
-        }
-        zoomBadge.setText(String.format(Locale.US, "%.1f×", zoom));
-        zoomBadge.setVisibility(View.VISIBLE);
-    }
-
-    private void resetZoom() {
-        if (cameraController == null) return;
-        cameraController.setZoom(1f);
-        updateZoomBadge(1f);
+    /** 把相机当前的变焦值同步到右侧滑条（捏合、切镜头、相机就绪时调用）。 */
+    private void syncZoomUi() {
+        if (zoomSlider == null || cameraController == null) return;
+        zoomSlider.setMaxZoom(cameraController.maxZoom());
+        zoomSlider.setZoom(cameraController.getZoom());
     }
 
     private final SensorEventListener motionListener = new SensorEventListener() {
@@ -868,13 +712,106 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         renderer.setStyle(style, intensity);
         for (int i = 0; i < chips.size(); i++) {
             TextView chip = chips.get(i);
-            boolean active = StylePreset.ALL[i] == preset;
+            boolean active = i < StylePreset.ALL.length && StylePreset.ALL[i] == preset;
             chip.setBackground(chipBg(active));
             chip.setTextColor(active ? 0xFFFFFFFF : 0xFFE9EAF2);
             chip.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
         }
         prefs.edit().putString("style", preset.id).apply();
+        if (styleBtn != null) styleBtn.setText("风格 · " + preset.name + " ▾");
         updateIntensityEnabled();
+    }
+
+    /**
+     * 风格面板：一屏选完风格 + 强度，选完即生效，点“完成”收起。
+     * 底部不再常驻一排风格按钮，界面清爽很多。
+     */
+    private void showStyleDialog() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(18), dp(10), dp(18), dp(4));
+
+        TextView tip = new TextView(this);
+        tip.setText("点一下即生效 · 拖下面滑块可调卡通强度");
+        tip.setTextColor(0xFF9AA0B2);
+        tip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        tip.setPadding(0, 0, 0, dp(8));
+        box.addView(tip);
+
+        final List<TextView> local = new ArrayList<>();
+        LinearLayout row = null;
+        for (int i = 0; i < StylePreset.ALL.length; i++) {
+            if (i % 3 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                box.addView(row, new LinearLayout.LayoutParams(MATCH, WRAP));
+            }
+            final StylePreset preset = StylePreset.ALL[i];
+            TextView b = pill(preset.name, preset == style);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+            b.setPadding(dp(4), dp(9), dp(4), dp(9));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, WRAP, 1f);
+            lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+            b.setOnClickListener(v -> selectStyle(preset));
+            row.addView(b, lp);
+            local.add(b);
+        }
+        chips.clear();
+        chips.addAll(local);
+
+        LinearLayout intRow = new LinearLayout(this);
+        intRow.setOrientation(LinearLayout.VERTICAL);
+        intRow.setPadding(0, dp(12), 0, 0);
+
+        intensityValue = new TextView(this);
+        intensityValue.setTextColor(0xFFE9EAF2);
+        intensityValue.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        intensityValue.setText("卡通强度：" + Math.round(intensity * 100) + "%");
+        intRow.addView(intensityValue);
+
+        intensityBar = new SeekBar(this);
+        intensityBar.setMax(100);
+        intensityBar.setProgress(Math.round(intensity * 100));
+        intensityBar.setProgressTintList(android.content.res.ColorStateList.valueOf(0xFFFF5C7A));
+        intensityBar.setThumbTintList(android.content.res.ColorStateList.valueOf(0xFFFF5C7A));
+        intensityBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                intensity = progress / 100f;
+                if (intensityValue != null) {
+                    intensityValue.setText("卡通强度：" + progress + "%");
+                }
+                renderer.setStyle(style, intensity);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                prefs.edit().putFloat("intensity", intensity).apply();
+            }
+        });
+        intRow.addView(intensityBar, new LinearLayout.LayoutParams(MATCH, WRAP));
+        box.addView(intRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(box);
+
+        AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("卡通风格")
+                .setView(scroll)
+                .setPositiveButton("完成", null)
+                .create();
+        dlg.setOnDismissListener(d -> {
+            prefs.edit().putFloat("intensity", intensity).apply();
+            chips.clear();
+            intensityBar = null;
+            intensityValue = null;
+            updateExtraUi();
+        });
+        dlg.show();
     }
 
     /** 正常模式不做任何调色，风格强度滑块此时没有意义，置灰。 */
@@ -1187,6 +1124,54 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         row.addView(pill, lp);
     }
 
+    /** 圆形小按钮：顶栏的闪光灯 / 说明 / 小精灵，以及快门行的相册 / 翻转头。 */
+    private TextView circleButton(String text, float sp, int sizeDp) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        t.setTextColor(0xFFF4F5FA);
+        t.setGravity(Gravity.CENTER);
+        t.setSingleLine(true);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.OVAL);
+        bg.setColor(0x40000000);
+        bg.setStroke(dp(1), 0x33FFFFFF);
+        t.setBackground(bg);
+        return t;
+    }
+
+    /** 第二层模式标签：普通 / 专业 / 傻瓜，等分宽度，选中时浅色胶囊。 */
+    private TextView modeTab(String text, boolean active) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(0, dp(7), 0, dp(8));
+        t.setBackground(modeTabBg(active));
+        t.setTextColor(active ? 0xFFF4F5FA : 0xFF9AA0B2);
+        if (active) t.setTypeface(Typeface.DEFAULT_BOLD);
+        return t;
+    }
+
+    private GradientDrawable modeTabBg(boolean active) {
+        GradientDrawable d = new GradientDrawable();
+        d.setCornerRadius(dp(9));
+        if (active) {
+            d.setColor(0x1FFFFFFF);
+            d.setStroke(dp(1), 0x2EFFFFFF);
+        } else {
+            d.setColor(Color.TRANSPARENT);
+        }
+        return d;
+    }
+
+    private void styleModeTab(TextView t, boolean active) {
+        if (t == null) return;
+        t.setBackground(modeTabBg(active));
+        t.setTextColor(active ? 0xFFF4F5FA : 0xFF9AA0B2);
+        t.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+    }
+
     private void stylePill(TextView t, boolean active) {
         if (t == null) return;
         t.setBackground(chipBg(active));
@@ -1268,9 +1253,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         styleSegment(photoPill, photo);
 
         int sub = currentSub();
-        stylePill(subNormalPill, sub == SUB_NORMAL);
-        stylePill(subProPill, sub == SUB_PRO);
-        stylePill(subIdiotPill, sub == SUB_IDIOT);
+        styleModeTab(subNormalPill, sub == SUB_NORMAL);
+        styleModeTab(subProPill, sub == SUB_PRO);
+        styleModeTab(subIdiotPill, sub == SUB_IDIOT);
 
         GradientDrawable d = (GradientDrawable) recordInner.getBackground();
         if (d != null) {
@@ -1283,34 +1268,33 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     private void updateExtraUi() {
         if (extraRow == null) return;
-        int sub = currentSub();
-        if (sub == SUB_NORMAL) {
-            extraRow.setVisibility(View.GONE);
-            return;
-        }
         extraRow.setVisibility(View.VISIBLE);
-        boolean video = captureMode == MODE_VIDEO;
+        if (styleBtn != null) styleBtn.setText("风格 · " + style.name + " ▾");
+
+        int sub = currentSub();
         if (sub == SUB_PRO) {
-            extraActionBtn.setText("调整");
+            extraActionBtn.setVisibility(View.VISIBLE);
+            boolean video = captureMode == MODE_VIDEO;
             CaptureParams p = video ? videoProParams : proParams;
             String s = p.summary();
             if (video && p.manualExposure && p.exposureNs > VIDEO_MAX_EXPOSURE_NS) {
-                s += " · 录像快门限 1/30s";
+                s += " · 快门限 1/30s";
             }
-            extraSummary.setText((video ? "录像 · " : "拍照 · ") + s);
-        } else {
-            extraActionBtn.setText("换场景");
+            extraActionBtn.setText("专业参数 · " + s + " ▾");
+        } else if (sub == SUB_IDIOT) {
+            extraActionBtn.setVisibility(View.VISIBLE);
             ScenePreset sp = curScene();
-            String mark = sp.custom ? "（自定义）" : (sp.edited ? "（已调参）" : "");
-            extraSummary.setText((video ? "录像场景 · " : "拍照场景 · ")
-                    + sp.name + mark + "：" + sp.hint);
+            String mark = sp.custom ? " ·自" : (sp.edited ? " ·调" : "");
+            extraActionBtn.setText(sp.name + mark + " ▾");
+        } else {
+            extraActionBtn.setVisibility(View.GONE);
         }
     }
 
     private void onExtraAction() {
         if (currentSub() == SUB_PRO) {
             showProDialog();
-        } else {
+        } else if (currentSub() == SUB_IDIOT) {
             showSceneDialog();
         }
     }
@@ -1389,26 +1373,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
         scroll.addView(box);
 
-        new AlertDialog.Builder(this)
+        AlertDialog proDialog = new AlertDialog.Builder(this)
                 .setTitle((video ? "录像" : "拍照") + " · 专业参数")
                 .setView(scroll)
                 .setPositiveButton("应用", (d, w) -> {
-                    CaptureParams q = new CaptureParams();
-                    q.manualExposure = isoIdx[0] > 0 || shutterIdx[0] > 0;
-                    if (q.manualExposure) {
-                        q.iso = isoIdx[0] > 0 ? ISO_VALUES[isoIdx[0]] : 200;
-                        q.exposureNs = shutterIdx[0] > 0 ? shutterValues[shutterIdx[0]]
-                                : (video ? 1_000_000_000L / 60 : 1_000_000_000L / 125);
-                    } else {
-                        q.ev = -2f + evIdx[0] * 0.1f;
-                    }
-                    q.wbAuto = wbIdx[0] == 0;
-                    q.kelvin = q.wbAuto ? 5200 : 2300 + (wbIdx[0] - 1) * 100;
-                    q.focusMode = focusIdx[0] == 0 ? CaptureParams.FOCUS_AUTO
-                            : focusIdx[0] == 1 ? CaptureParams.FOCUS_INFINITY
-                            : focusIdx[0] == 2 ? CaptureParams.FOCUS_MACRO
-                            : CaptureParams.FOCUS_MANUAL;
-                    q.diopter = manualIdx[0] / 10f;
+                    CaptureParams q = proSlidersToParams(video, isoIdx[0], shutterIdx[0],
+                            evIdx[0], wbIdx[0], focusIdx[0], manualIdx[0]);
                     if (video) {
                         videoProParams = q;
                         saveProParams("vpro_", q);
@@ -1418,6 +1388,57 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     }
                     applyCameraParams();
                     updateExtraUi();
+                })
+                .setNeutralButton("存为场景", (d, w) -> promptSaveScene(proSlidersToParams(video,
+                        isoIdx[0], shutterIdx[0], evIdx[0], wbIdx[0], focusIdx[0], manualIdx[0])))
+                .setNegativeButton("取消", null)
+                .create();
+        proDialog.setOnDismissListener(d -> updateExtraUi());
+        proDialog.show();
+    }
+
+    /** 把专业参数面板里六个滑块的位置换算成一份完整参数。 */
+    private CaptureParams proSlidersToParams(boolean video, int isoIdx, int shutterIdx, int evIdx,
+                                             int wbIdx, int focusIdx, int manualIdx) {
+        CaptureParams q = new CaptureParams();
+        q.manualExposure = isoIdx > 0 || shutterIdx > 0;
+        if (q.manualExposure) {
+            q.iso = isoIdx > 0 ? ISO_VALUES[isoIdx] : 200;
+            q.exposureNs = shutterIdx > 0 ? (video ? SHUTTER_VALUES_VIDEO : SHUTTER_VALUES)[shutterIdx]
+                    : (video ? 1_000_000_000L / 60 : 1_000_000_000L / 125);
+        } else {
+            q.ev = -2f + evIdx * 0.1f;
+        }
+        q.wbAuto = wbIdx == 0;
+        q.kelvin = q.wbAuto ? 5200 : 2300 + (wbIdx - 1) * 100;
+        q.focusMode = focusIdx == 0 ? CaptureParams.FOCUS_AUTO
+                : focusIdx == 1 ? CaptureParams.FOCUS_INFINITY
+                : focusIdx == 2 ? CaptureParams.FOCUS_MACRO
+                : CaptureParams.FOCUS_MANUAL;
+        q.diopter = manualIdx / 10f;
+        return q;
+    }
+
+    /** 专业模式调好后，把当前参数存成傻瓜模式里的一个场景。 */
+    private void promptSaveScene(CaptureParams p) {
+        EditText et = new EditText(this);
+        et.setHint("场景名称，例如 我的夜景");
+        et.setSingleLine(true);
+        new AlertDialog.Builder(this)
+                .setTitle("保存为场景")
+                .setMessage("把这组" + (captureMode == MODE_VIDEO ? "录像" : "拍照")
+                        + "参数存进傻瓜模式，之后一键复用。")
+                .setView(et)
+                .setPositiveButton("保存", (d, w) -> {
+                    String nm = et.getText().toString().trim();
+                    if (nm.isEmpty()) nm = "我的参数" + (sceneList.size() + 1);
+                    ScenePreset sp = new ScenePreset("c" + System.currentTimeMillis(), nm,
+                            p.summary(), p.manualExposure, p.iso, p.exposureNs, p.ev,
+                            p.kelvin, p.wbAuto, p.focusMode, p.diopter);
+                    sp.custom = true;
+                    sceneStore.add(sp);
+                    updateExtraUi();
+                    toast("已存为场景 · " + nm + "（傻瓜模式里可选）");
                 })
                 .setNegativeButton("取消", null)
                 .show();
@@ -1613,6 +1634,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         list.addView(addRow, new LinearLayout.LayoutParams(MATCH, WRAP));
 
+        TextView fromAlbum = pill("从相册照片 / 视频读取拍摄参数", false);
+        fromAlbum.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        fromAlbum.setPadding(dp(12), dp(10), dp(12), dp(10));
+        fromAlbum.setContentDescription("读取相册媒体的 EXIF 拍摄参数并新增为场景");
+        fromAlbum.setOnClickListener(v -> {
+            if (sceneDialog != null) sceneDialog.dismiss();
+            pickSceneSource();
+        });
+        LinearLayout.LayoutParams albumLp = new LinearLayout.LayoutParams(MATCH, WRAP);
+        albumLp.setMargins(dp(4), 0, dp(4), dp(6));
+        list.addView(fromAlbum, albumLp);
+
         LinearLayout row = null;
         for (int i = 0; i < sceneList.size(); i++) {
             if (i % 3 == 0) {
@@ -1660,7 +1693,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
      */
     private void showSceneEditor(ScenePreset base, boolean isNew) {
         final boolean custom = base != null && base.custom;
-        final boolean builtin = base != null && !base.custom;
+        final boolean builtin = base != null && !base.custom && !isNew;
 
         final int[] isoIdx = {base == null ? 2 : (base.manual ? Math.max(1, isoIndexOf(base.iso)) : 0)};
         final int[] shIdx = {base == null ? 4 : (base.manual ? Math.max(1, shutterIndexOf(base.exposureNs)) : 0)};
@@ -1800,6 +1833,245 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     private AlertDialog sceneDialog;
 
+    // ------------------------------------------------------------------ 从相册读取拍摄参数
+
+    private void pickSceneSource() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+        try {
+            startActivityForResult(i, REQ_PICK_SCENE);
+        } catch (Throwable t) {
+            Log.e(TAG, "pick scene source", t);
+            toast("无法打开相册");
+        }
+    }
+
+    private void importSceneFromUri(Uri uri) {
+        toast("正在读取拍摄参数…");
+        worker.execute(() -> {
+            ScenePreset imported;
+            try {
+                imported = readSceneFromMedia(uri);
+            } catch (Throwable t) {
+                Log.e(TAG, "import scene", t);
+                ui.post(() -> toast("读取失败：这张照片/视频没有可用的拍摄参数"));
+                return;
+            }
+            ui.post(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                // 以“新增场景”的方式打开编辑器，参数已按片子的 EXIF 预填好，可再改后保存
+                showSceneEditor(imported, true);
+                toast("已读取参数，确认后保存到场景");
+            });
+        });
+    }
+
+    private ScenePreset readSceneFromMedia(Uri uri) throws Exception {
+        String type = null;
+        try {
+            type = getContentResolver().getType(uri);
+        } catch (Throwable ignored) {
+        }
+        String name = mediaDisplayName(uri);
+        if (type != null && type.startsWith("video/")) {
+            return readVideoScene(uri, name);
+        }
+        if (type != null && type.startsWith("image/")) {
+            return readImageScene(uri, name);
+        }
+        try {
+            return readImageScene(uri, name);
+        } catch (Throwable t) {
+            return readVideoScene(uri, name);
+        }
+    }
+
+    private String mediaDisplayName(Uri uri) {
+        String name = null;
+        try (Cursor c = getContentResolver().query(uri,
+                new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) name = c.getString(idx);
+            }
+        } catch (Throwable ignored) {
+        }
+        if (name == null || name.isEmpty()) name = uri.getLastPathSegment();
+        if (name == null || name.isEmpty()) name = "相册场景";
+        int slash = name.lastIndexOf('/');
+        if (slash >= 0) name = name.substring(slash + 1);
+        int dot = name.lastIndexOf('.');
+        if (dot > 0) name = name.substring(0, dot);
+        return name.length() > 18 ? name.substring(0, 18) : name;
+    }
+
+    private ScenePreset readImageScene(Uri uri, String name) throws Exception {
+        ExifInterface exif;
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) throw new IllegalStateException("无法打开照片");
+            exif = new ExifInterface(in);
+        }
+        int iso = exif.getAttributeInt("PhotographicSensitivity", 0);
+        if (iso <= 0) iso = exif.getAttributeInt(ExifInterface.TAG_ISO_SPEED_RATINGS, 0);
+        double et = exif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, 0d);
+        double evRaw = exif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_BIAS_VALUE, 0d);
+        int wbManual = exif.getAttributeInt(ExifInterface.TAG_WHITE_BALANCE, 0);
+        int light = exif.getAttributeInt(ExifInterface.TAG_LIGHT_SOURCE, 0);
+        double dist = exif.getAttributeDouble(ExifInterface.TAG_SUBJECT_DISTANCE, 0d);
+
+        boolean manual = iso > 0 || et > 0;
+        if (iso <= 0) iso = 200;
+        long ns = et > 0 ? Math.round(et * 1e9) : 1_000_000_000L / 125;
+        ns = Math.max(1_000_000L, Math.min(2_000_000_000L, ns));
+        float ev = Math.max(-2f, Math.min(2f, Math.round(evRaw * 10f) / 10f));
+
+        boolean wbAuto = wbManual != 1 || light <= 0;
+        int kelvin = wbAuto ? 5200 : clampKelvin(lightSourceKelvin(light));
+
+        int focusMode = CaptureParams.FOCUS_AUTO;
+        float diopter = 0f;
+        if (dist > 0.01) {
+            if (dist >= 8) {
+                focusMode = CaptureParams.FOCUS_INFINITY;
+            } else {
+                focusMode = CaptureParams.FOCUS_MANUAL;
+                diopter = Math.min(10f, (float) (1.0 / dist));
+            }
+        }
+
+        StringBuilder hint = new StringBuilder("相册照片");
+        if (iso > 0 && et > 0) {
+            hint.append(" · ISO ").append(iso).append(" · ")
+                    .append(CaptureParams.shutterText(ns));
+        }
+        if (!wbAuto) hint.append(" · ").append(kelvin).append("K");
+        if (focusMode == CaptureParams.FOCUS_INFINITY) {
+            hint.append(" · 无穷远");
+        } else if (focusMode == CaptureParams.FOCUS_MANUAL) {
+            hint.append(" · 对焦 ").append(String.format(Locale.US, "%.0fcm", dist * 100));
+        }
+        return new ScenePreset("c" + System.currentTimeMillis(), name, hint.toString(),
+                manual, iso, ns, ev, kelvin, wbAuto, focusMode, diopter);
+    }
+
+    private ScenePreset readVideoScene(Uri uri, String name) {
+        int fps = 0;
+        int iso = 0;
+        long ns = 0;
+        MediaExtractor ex = null;
+        try {
+            ex = new MediaExtractor();
+            ex.setDataSource(this, uri, null);
+            for (int i = 0; i < ex.getTrackCount(); i++) {
+                MediaFormat f = ex.getTrackFormat(i);
+                String mime = mediaString(f, MediaFormat.KEY_MIME);
+                if (mime == null || !mime.startsWith("video/")) continue;
+                Integer fr = mediaInt(f, MediaFormat.KEY_FRAME_RATE);
+                if (fr != null && fr > fps) fps = fr;
+                Integer isoV = mediaInt(f, "iso-speed");
+                if (isoV != null && isoV > 0) iso = isoV;
+                String etS = mediaString(f, "exposure-time");
+                if (etS != null) {
+                    try {
+                        double seconds;
+                        int slash = etS.indexOf('/');
+                        if (slash > 0) {
+                            seconds = Double.parseDouble(etS.substring(0, slash).trim())
+                                    / Double.parseDouble(etS.substring(slash + 1).trim());
+                        } else {
+                            seconds = Double.parseDouble(etS.trim());
+                        }
+                        ns = Math.round(seconds * 1e9);
+                    } catch (Throwable ignored) {
+                        ns = 0;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "video extractor", t);
+        } finally {
+            if (ex != null) {
+                try {
+                    ex.release();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        if (fps <= 0) {
+            MediaMetadataRetriever mmr = new MediaMetadataRetriever();
+            try {
+                mmr.setDataSource(this, uri);
+                String f = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE);
+                if (f != null) fps = Math.round(Float.parseFloat(f));
+            } catch (Throwable ignored) {
+            } finally {
+                try {
+                    mmr.release();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        if (ns <= 0 && fps > 0) ns = 1_000_000_000L / (fps * 2L);
+        ns = Math.max(1_000_000L, Math.min(1_000_000_000L / 30, ns));
+
+        boolean manual = iso > 0;
+        if (iso <= 0) iso = 200;
+
+        StringBuilder hint = new StringBuilder("相册视频");
+        if (fps > 0) hint.append(" · ").append(fps).append("fps");
+        if (iso > 0) hint.append(" · ISO ").append(iso);
+        return new ScenePreset("c" + System.currentTimeMillis(), name, hint.toString(),
+                manual, iso, ns, 0f, 5200, true, CaptureParams.FOCUS_AUTO, 0f);
+    }
+
+    private static Integer mediaInt(MediaFormat f, String key) {
+        try {
+            return f.containsKey(key) ? f.getInteger(key) : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static String mediaString(MediaFormat f, String key) {
+        try {
+            return f.containsKey(key) ? f.getString(key) : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** EXIF 光源值 → 近似色温。 */
+    private static int lightSourceKelvin(int light) {
+        switch (light) {
+            case 1: return 5500;   // 日光
+            case 2: return 4000;   // 荧光灯
+            case 3: return 2850;   // 钨丝灯
+            case 4: return 5500;   // 闪光灯
+            case 9: return 5500;   // 晴天
+            case 10: return 6500;  // 阴天
+            case 11: return 7500;  // 阴影
+            case 12: return 4400;  // 日光色荧光灯
+            case 13: return 5000;  // 暖白荧光灯
+            case 14: return 4000;  // 冷白荧光灯
+            case 15: return 3500;  // 白色荧光灯
+            case 16: return 2856;  // 标准 A
+            case 17: return 4874;  // 标准 B
+            case 18: return 6774;  // 标准 C
+            case 19: return 5500;  // D55
+            case 20: return 6500;  // D65
+            case 21: return 7500;  // D75
+            case 22: return 5000;  // D50
+            case 23: return 3200;  // 影棚钨丝灯
+            default: return 5200;
+        }
+    }
+
+    private static int clampKelvin(int kelvin) {
+        return Math.max(2300, Math.min(7900, kelvin));
+    }
+
     // ------------------------------------------------------------------ 相册处理
 
     private void pickFromGallery() {
@@ -1822,6 +2094,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_PICK_SCENE) {
+            if (resultCode != RESULT_OK || data == null) return;
+            Uri pick = data.getData();
+            if (pick == null) return;
+            try {
+                getContentResolver().takePersistableUriPermission(pick,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Throwable ignored) {
+            }
+            importSceneFromUri(pick);
+            return;
+        }
         if (requestCode != REQ_PICK || resultCode != RESULT_OK || data == null) return;
         Uri uri = data.getData();
         if (uri == null) return;
@@ -2076,7 +2360,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 ui.post(() -> {
                     updateFlashUi();
                     applyFlashState();
-                    updateZoomBadge(cameraController.getZoom());
+                    syncZoomUi();
                 });
             }
 
