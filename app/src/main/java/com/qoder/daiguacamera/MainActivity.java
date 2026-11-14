@@ -4,6 +4,7 @@ import android.Manifest;
 import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Intent;
@@ -12,6 +13,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -40,7 +42,11 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.view.WindowManager;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -66,6 +72,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final int REQ_PICK = 31;
     private static final int REQ_WRITE = 32;
     private static final int REQ_WRITE_PHOTO = 33;
+    private static final String DOC_GUIDE = "file:///android_asset/docs/user_guide.html";
+    private static final String DOC_LOG = "file:///android_asset/docs/changelog.html";
     private static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
 
@@ -277,6 +285,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         LinearLayout.LayoutParams galleryLp = new LinearLayout.LayoutParams(dp(42), dp(42));
         galleryLp.rightMargin = dp(8);
         topBar.addView(galleryBtn, galleryLp);
+
+        TextView docsBtn = new TextView(this);
+        docsBtn.setText("说明");
+        docsBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        docsBtn.setTextColor(0xFFFFFFFF);
+        docsBtn.setGravity(Gravity.CENTER);
+        GradientDrawable docsBg = new GradientDrawable();
+        docsBg.setShape(GradientDrawable.OVAL);
+        docsBg.setColor(0x40000000);
+        docsBg.setStroke(dp(1), 0x33FFFFFF);
+        docsBtn.setBackground(docsBg);
+        docsBtn.setContentDescription("操作手册与版本更新说明");
+        docsBtn.setOnClickListener(v -> showDocsDialog());
+        LinearLayout.LayoutParams docsLp = new LinearLayout.LayoutParams(dp(42), dp(42));
+        docsLp.rightMargin = dp(8);
+        topBar.addView(docsBtn, docsLp);
 
         spriteBtn = new TextView(this);
         spriteBtn.setText("✦");
@@ -642,6 +666,118 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             intensityBar.setAlpha(on ? 1f : 0.35f);
         }
         if (intensityValue != null) intensityValue.setAlpha(on ? 1f : 0.35f);
+    }
+
+    /** 内置说明：操作手册与版本更新说明，内容打包在 APK 的 assets 里，离线可看。 */
+    private void showDocsDialog() {
+        final Dialog dlg = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(0xFF07070B);
+
+        final LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(20), dp(10), dp(12), dp(6));
+
+        TextView title = new TextView(this);
+        title.setText("使用说明");
+        title.setTextColor(0xFFFFFFFF);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        head.addView(title, new LinearLayout.LayoutParams(0, WRAP, 1f));
+
+        TextView close = new TextView(this);
+        close.setText("✕");
+        close.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        close.setTextColor(0xFFE9EAF2);
+        close.setGravity(Gravity.CENTER);
+        GradientDrawable closeBg = new GradientDrawable();
+        closeBg.setShape(GradientDrawable.OVAL);
+        closeBg.setColor(0x1AFFFFFF);
+        closeBg.setStroke(dp(1), 0x26FFFFFF);
+        close.setBackground(closeBg);
+        close.setOnClickListener(v -> dlg.dismiss());
+        head.addView(close, new LinearLayout.LayoutParams(dp(38), dp(38)));
+        root.addView(head, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        final LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        tabs.setPadding(dp(16), 0, dp(16), dp(8));
+        final TextView guideTab = pill("操作手册", true);
+        guideTab.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        guideTab.setPadding(dp(14), dp(6), dp(14), dp(7));
+        final TextView logTab = pill("更新说明", false);
+        logTab.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        logTab.setPadding(dp(14), dp(6), dp(14), dp(7));
+        LinearLayout.LayoutParams tabLp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        tabLp.rightMargin = dp(8);
+        tabs.addView(guideTab, tabLp);
+        tabs.addView(logTab, new LinearLayout.LayoutParams(WRAP, WRAP));
+        root.addView(tabs, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        final WebView web = new WebView(this);
+        web.setBackgroundColor(0xFF07070B);
+        WebSettings ws = web.getSettings();
+        ws.setJavaScriptEnabled(false);
+        ws.setAllowFileAccess(true);
+        ws.setDomStorageEnabled(false);
+        web.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                if (url == null) return false;
+                if (url.startsWith("file:///android_asset/docs/")) {
+                    boolean log = url.contains("changelog.html");
+                    view.loadUrl(url);
+                    stylePill(guideTab, !log);
+                    stylePill(logTab, log);
+                    return true;
+                }
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                } catch (Throwable t) {
+                    toast("打不开这个链接");
+                }
+                return true;
+            }
+        });
+        web.loadUrl(DOC_GUIDE);
+        root.addView(web, new LinearLayout.LayoutParams(MATCH, 0, 1f));
+
+        guideTab.setOnClickListener(v -> {
+            web.loadUrl(DOC_GUIDE);
+            stylePill(guideTab, true);
+            stylePill(logTab, false);
+        });
+        logTab.setOnClickListener(v -> {
+            web.loadUrl(DOC_LOG);
+            stylePill(guideTab, false);
+            stylePill(logTab, true);
+        });
+
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int top = insets.getSystemWindowInsetTop();
+            int bottom = insets.getSystemWindowInsetBottom();
+            head.setPadding(dp(20), top + dp(8), dp(12), dp(6));
+            web.setPadding(0, 0, 0, bottom);
+            return insets;
+        });
+
+        dlg.setContentView(root);
+        dlg.setOnDismissListener(d -> {
+            try {
+                web.stopLoading();
+                web.loadUrl("about:blank");
+                web.destroy();
+            } catch (Throwable ignored) {
+            }
+        });
+        dlg.show();
+        Window w = dlg.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawable(new ColorDrawable(0xFF07070B));
+            w.setLayout(MATCH, MATCH);
+        }
     }
 
     // ------------------------------------------------------------------ 快门 / 拍照

@@ -19,8 +19,9 @@ echo "[2/7] 链接资源与清单"
   -I "$PLATFORM" \
   --manifest "$ROOT/app/src/main/AndroidManifest.xml" \
   --java "$OUT/gen" \
+  -A "$ROOT/app/src/main/assets" \
   --min-sdk-version 24 --target-sdk-version 34 \
-  --version-code 10 --version-name 1.9 \
+  --version-code 11 --version-name 1.10 \
   "$OUT/res.zip"
 
 echo "[3/7] 编译 Java"

@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>呆瓜相机 · 版本更新说明</title>
+<style>
+:root { color-scheme: dark; }
+html, body { margin: 0; padding: 0; background: #07070b; color: #e9eaf2; }
+body { padding: 0 16px 28px; font-family: -apple-system, "Noto Sans CJK SC",
+       "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+       font-size: 15px; line-height: 1.78; -webkit-text-size-adjust: 100%; }
+main { max-width: 760px; margin: 0 auto; }
+h1 { font-size: 22px; color: #ff5c7a; margin: 14px 0 8px; letter-spacing: .5px; }
+h2 { font-size: 18px; color: #ffffff; margin: 26px 0 8px; padding-bottom: 6px;
+     border-bottom: 1px solid #232634; }
+h3 { font-size: 16px; color: #dfe3ee; margin: 18px 0 6px; }
+p { margin: 8px 0; }
+ul, ol { margin: 8px 0; padding-left: 22px; }
+li { margin: 4px 0; }
+a { color: #6fb6ff; text-decoration: none; word-break: break-all; }
+hr { border: none; border-top: 1px solid #1e2130; margin: 22px 0; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+th:first-child, td:first-child { width: 30%; }
+th, td { border: 1px solid #2a2d3a; padding: 8px 10px; text-align: left; vertical-align: top; }
+th { background: #151722; color: #ffffff; font-weight: 600; }
+td { background: #0c0d13; }
+code { background: #151722; color: #ffd0a6; padding: 1px 5px; border-radius: 4px;
+       font-size: 13px; word-break: break-all; }
+strong { color: #ffffff; }
+</style>
+</head>
+<body><main>
+<h1 id="版本更新说明">版本更新说明</h1>
+<p>呆瓜相机（Android）历史版本变更记录。最新版本：<strong>v1.10</strong>。</p>
+<h2 id="v110">v1.10</h2>
+<ul>
+<li><strong>操作手册与版本更新说明打包进 APK</strong>：顶部新增「说明」按钮，内置两个标签页，完全离线可看</li>
+<li>手册内容更新：界面说明加入「说明」入口，版本号同步</li>
+<li>小精灵默认关闭、正常风格等逻辑不变</li>
+</ul>
+<h2 id="v19">v1.9</h2>
+<ul>
+<li><strong>小精灵默认关闭</strong>：新安装默认不显示小精灵；从旧版本升级时也会自动关闭一次，之后完全尊重用户自己的开关</li>
+<li>新增《操作手册》（<code>USER_GUIDE.md</code>）与《版本更新说明》（<code>CHANGELOG.md</code>）</li>
+<li>正常 / 卡通等风格逻辑不变</li>
+</ul>
+<h2 id="v18">v1.8</h2>
+<ul>
+<li>底部风格栏最前面新增 <strong>正常</strong>，并设为默认风格（录像、拍照共用）</li>
+<li>正常模式不做任何卡通调色：预览、录像、拍照、相册图片/视频均原样输出（只保留裁剪与镜像）</li>
+<li>相册里的 mp4 视频在正常模式下直接原样保存，不再重新编码</li>
+<li>正常模式下拍照直接保存相机原图，不经过 GPU 管线，成功率更高</li>
+<li>正常模式下「风格强度」滑块自动置灰</li>
+</ul>
+<h2 id="v17">v1.7</h2>
+<ul>
+<li>包名改为 <code>com.qoder.daiguacamera</code>（与旧版本不兼容，需卸载旧版后重装）</li>
+<li>场景参数可编辑：内置场景支持调整、保存、恢复默认</li>
+<li>支持新增自定义场景，配好参数后与内置场景一样使用</li>
+</ul>
+<h2 id="v16">v1.6</h2>
+<ul>
+<li>应用更名为「呆瓜相机」</li>
+<li>修复「处理照片卡通化没成功」：手动曝光参数被拒时自动回退、渲染失败时降级重试、小精灵层异常隔离、Android 9 及以下补存储权限、拍照卡死时保存预览画面兜底</li>
+</ul>
+<h2 id="v15">v1.5</h2>
+<ul>
+<li>拍照新增三种模式：普通 / 专业 / 傻瓜</li>
+<li>傻瓜模式内置 25 个场景预设（日出、日落、星空、夜景、烟花、雪景、人像、美食等），自动匹配曝光与白平衡</li>
+<li>新增小精灵总开关，可决定相机、拍照、相册处理时是否出现小精灵</li>
+</ul>
+<h2 id="v14">v1.4</h2>
+<ul>
+<li>新增相册处理：图片与视频都能卡通化</li>
+<li>图片保存为 JPEG，最长边 1600；视频重编码为 mp4（最长边 1280）并保留原音轨</li>
+</ul>
+<h2 id="v13">v1.3</h2>
+<ul>
+<li>小精灵多样化：8 个种族、6 种性格，各自偏好不同的落脚点与反应</li>
+<li>小精灵会随手机晃动、触摸抚摸和敲击做出不同反应</li>
+</ul>
+<h2 id="v12">v1.2</h2>
+<ul>
+<li>新增随机小精灵：按画面内容自动选位，支持触摸互动</li>
+</ul>
+<h2 id="v11">v1.1</h2>
+<ul>
+<li>大幅增强卡通化效果：半分辨率双边平滑 + YIQ 色阶量化 + Sobel 描边</li>
+</ul>
+<h2 id="v10">v1.0</h2>
+<ul>
+<li>首个版本：Camera2 + OpenGL ES 实时卡通滤镜、6 种风格、视频录制</li>
+</ul>
+
+</main></body>
+</html>

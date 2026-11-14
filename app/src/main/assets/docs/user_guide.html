@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>呆瓜相机 · 操作手册</title>
+<style>
+:root { color-scheme: dark; }
+html, body { margin: 0; padding: 0; background: #07070b; color: #e9eaf2; }
+body { padding: 0 16px 28px; font-family: -apple-system, "Noto Sans CJK SC",
+       "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+       font-size: 15px; line-height: 1.78; -webkit-text-size-adjust: 100%; }
+main { max-width: 760px; margin: 0 auto; }
+h1 { font-size: 22px; color: #ff5c7a; margin: 14px 0 8px; letter-spacing: .5px; }
+h2 { font-size: 18px; color: #ffffff; margin: 26px 0 8px; padding-bottom: 6px;
+     border-bottom: 1px solid #232634; }
+h3 { font-size: 16px; color: #dfe3ee; margin: 18px 0 6px; }
+p { margin: 8px 0; }
+ul, ol { margin: 8px 0; padding-left: 22px; }
+li { margin: 4px 0; }
+a { color: #6fb6ff; text-decoration: none; word-break: break-all; }
+hr { border: none; border-top: 1px solid #1e2130; margin: 22px 0; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+th:first-child, td:first-child { width: 30%; }
+th, td { border: 1px solid #2a2d3a; padding: 8px 10px; text-align: left; vertical-align: top; }
+th { background: #151722; color: #ffffff; font-weight: 600; }
+td { background: #0c0d13; }
+code { background: #151722; color: #ffd0a6; padding: 1px 5px; border-radius: 4px;
+       font-size: 13px; word-break: break-all; }
+strong { color: #ffffff; }
+</style>
+</head>
+<body><main>
+<h1 id="呆瓜相机--操作手册">呆瓜相机 · 操作手册</h1>
+<p>适用版本：<strong>v1.10</strong>（versionCode 11）<br />
+系统要求：Android 7.0 及以上<br />
+包名：<code>com.qoder.daiguacamera</code></p>
+<hr />
+<h2 id="1-安装与首次启动">1. 安装与首次启动</h2>
+<ol>
+<li>安装 <code>daigua-camera-v1.10.apk</code>。如果手机提示“未知来源”，允许当前文件管理器安装即可。</li>
+<li>首次打开会申请 <strong>相机</strong> 和 <strong>麦克风</strong> 权限：
+<ul>
+<li>相机：必需，否则无法预览和拍摄。</li>
+<li>麦克风：录像收音用；拒绝也能录像，但视频没有声音。</li>
+</ul></li>
+<li>Android 9 及以下在第一次保存照片/视频时会再申请一次存储权限，允许后才能写入相册。</li>
+<li>从 v1.6 及更早版本升级（旧包名 <code>com.qoder.cartooncamera</code>）需要先卸载旧版；v1.7 起包名已统一，可直接覆盖安装。</li>
+</ol>
+<hr />
+<h2 id="2-界面一览">2. 界面一览</h2>
+<p><strong>顶部</strong></p>
+<table>
+<thead>
+<tr class="header">
+<th>按钮</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>相册</td>
+<td>从系统相册选一张图片或一段视频，用当前风格处理</td>
+</tr>
+<tr class="even">
+<td>说明</td>
+<td>打开内置的操作手册与版本更新说明（离线可看）</td>
+</tr>
+<tr class="odd">
+<td>✦</td>
+<td>小精灵开关（默认关闭）</td>
+</tr>
+<tr class="even">
+<td>⇄</td>
+<td>前置 / 后置摄像头切换（录像中不可用）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>底部</strong></p>
+<ul>
+<li><strong>录像 / 拍照</strong>：两种拍摄模式，录像中不能切换。</li>
+<li><strong>普通 / 专业 / 傻瓜</strong>：仅拍照模式显示。</li>
+<li><strong>风格栏</strong>：正常、卡通、漫画、水彩、素描、像素、霓虹。默认「正常」。</li>
+<li><strong>风格强度</strong>：0%–100%，只对卡通类风格有效；「正常」下自动置灰。</li>
+<li><strong>参数行</strong>：专业模式显示参数摘要和「调整」；傻瓜模式显示当前场景和「换场景」。</li>
+<li><strong>快门键</strong>：录像时是红色圆点，拍照时是白色圆点。</li>
+</ul>
+<hr />
+<h2 id="3-录像">3. 录像</h2>
+<ol>
+<li>确认底部选中「录像」。</li>
+<li>点一次快门开始录制，顶部出现红点和计时。</li>
+<li>再点一次快门停止并保存。</li>
+<li>视频保存到相册的 <code>Movies/DaiguaCamera</code>，完成后会提示保存位置。</li>
+</ol>
+<p>录像使用当前选中的风格：选「正常」就是相机原始画面；选卡通类风格就是实时卡通画面。</p>
+<hr />
+<h2 id="4-拍照">4. 拍照</h2>
+<p>点「拍照」后，可在三种子模式中选择。</p>
+<h3 id="41-普通">4.1 普通</h3>
+<p>全自动曝光、自动白平衡、自动对焦，适合随手拍。拍完按当前风格处理并保存到 <code>Pictures/DaiguaCamera</code>。</p>
+<h3 id="42-专业">4.2 专业</h3>
+<p>点参数行右侧「调整」，可分别设置：</p>
+<table>
+<thead>
+<tr class="header">
+<th>参数</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>ISO</td>
+<td>自动，或 100 / 200 / 400 / 800 / 1600 … 等固定值</td>
+</tr>
+<tr class="even">
+<td>快门</td>
+<td>自动，或 1/1000s–2s 的固定速度</td>
+</tr>
+<tr class="odd">
+<td>曝光补偿</td>
+<td>-2.0 到 +2.0，仅自动曝光时生效</td>
+</tr>
+<tr class="even">
+<td>白平衡</td>
+<td>自动，或 2300K–7900K 手动色温</td>
+</tr>
+<tr class="odd">
+<td>对焦</td>
+<td>自动 / 无穷远 / 微距 / 手动</td>
+</tr>
+<tr class="even">
+<td>手动焦距</td>
+<td>对焦选「手动」时生效，0–10 档，数值越大对得越近</td>
+</tr>
+</tbody>
+</table>
+<p>规则：**ISO 和快门都选“自动”**时走自动曝光，只叠加曝光补偿；<strong>任意一个选了固定值</strong>就切到手动曝光，此时曝光补偿不再生效。</p>
+<p>设置会记在本机，下次打开仍然保留。</p>
+<h3 id="43-傻瓜">4.3 傻瓜</h3>
+<p>内置 25 个场景，按类别大致分为：</p>
+<ul>
+<li>风光与夜景：日出、日落、晚霞、月亮、星空、夜景、烟花、灯</li>
+<li>自然：大海、瀑布、远山、云、丁达尔、雾、彩虹</li>
+<li>天气：雨滴、雨天、长雨丝、雪花、雪天、雪景</li>
+<li>人像与静物：人像、逆光、美食、花</li>
+</ul>
+<p>点一下即使用，参数行会显示场景名和一句提示。</p>
+<p><strong>调整场景</strong></p>
+<ul>
+<li>点「换场景」→ 长按任意场景，进入参数编辑。</li>
+<li>内置场景：可改参数、可「恢复默认」，不能改名。</li>
+<li>自定义场景：可改名、改参数、删除。</li>
+<li>点「＋ 新增场景」，填名称和提示、调好参数后保存，就会出现在场景列表里，和内置场景一样使用。</li>
+<li>列表里的标记：<code>·自</code> 表示自定义场景，<code>*</code> 表示参数被改过。</li>
+</ul>
+<p>场景参数只影响曝光、白平衡、对焦，不改变卡通风格。</p>
+<hr />
+<h2 id="5-风格与强度">5. 风格与强度</h2>
+<table>
+<thead>
+<tr class="header">
+<th>风格</th>
+<th>特点</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><strong>正常</strong>（默认）</td>
+<td>不做任何卡通处理，直接输出相机画面</td>
+</tr>
+<tr class="even">
+<td>卡通</td>
+<td>平整色块 + 描边，通用卡通感</td>
+</tr>
+<tr class="odd">
+<td>漫画</td>
+<td>更强描边和网点</td>
+</tr>
+<tr class="even">
+<td>水彩</td>
+<td>柔和色块、轻微颗粒</td>
+</tr>
+<tr class="odd">
+<td>素描</td>
+<td>黑白铅笔线条</td>
+</tr>
+<tr class="even">
+<td>像素</td>
+<td>像素块化</td>
+</tr>
+<tr class="odd">
+<td>霓虹</td>
+<td>高饱和、发光描边</td>
+</tr>
+</tbody>
+</table>
+<p>「正常」模式下，预览、录像、拍照、相册处理都原样输出，只保留画面裁剪和前置镜像；此时风格强度滑块置灰。切回任意卡通风格后，强度立即恢复作用。</p>
+<hr />
+<h2 id="6-小精灵">6. 小精灵</h2>
+<ul>
+<li><strong>默认关闭</strong>。点顶部 ✦ 打开，再点关闭；按钮变暗表示关闭。</li>
+<li>打开后，小精灵会出现在实时预览、录像、拍照和相册处理结果里；关闭后全部不出现。</li>
+<li>小精灵会根据画面内容挑平整的位置落脚，随手机晃动、触摸抚摸、敲击做出不同反应。</li>
+<li>目前有 8 个种族、6 种性格，每次出现的小精灵不完全一样。</li>
+</ul>
+<p>建议：想要干净的照片就保持关闭；想要“呆瓜”一点的效果再打开。</p>
+<hr />
+<h2 id="7-相册处理">7. 相册处理</h2>
+<ol>
+<li>点顶部「相册」，选择一张图片或一段视频。</li>
+<li>按当前的风格、强度和小精灵开关处理，弹窗显示进度，可随时取消。</li>
+<li>完成后自动保存，图片会弹出预览。</li>
+</ol>
+<p>处理规则：</p>
+<ul>
+<li><strong>图片</strong>：最长边 1600，保存为 JPEG 到 <code>Pictures/DaiguaCamera</code>。</li>
+<li><strong>视频</strong>：最长边 1280，重编码为 mp4 到 <code>Movies/DaiguaCamera</code>，原音轨会保留。</li>
+<li><strong>正常 + 小精灵关闭</strong>：图片直接复制（超过 1600 会缩到 1600），mp4 视频直接原样复制、不重新编码，速度最快、画质无损。</li>
+<li>处理视频会调用硬件编解码，机身发热、耗电属于正常现象。</li>
+</ul>
+<hr />
+<h2 id="8-保存位置">8. 保存位置</h2>
+<table>
+<thead>
+<tr class="header">
+<th>内容</th>
+<th>位置</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>拍照 / 相册图片</td>
+<td><code>Pictures/DaiguaCamera</code></td>
+</tr>
+<tr class="even">
+<td>录像 / 相册视频</td>
+<td><code>Movies/DaiguaCamera</code></td>
+</tr>
+</tbody>
+</table>
+<p>保存成功后会提示「已保存到相册 · …」。在系统相册的「相册」或「文件夹」里也能找到 <code>DaiguaCamera</code>。</p>
+<hr />
+<h2 id="9-常见问题">9. 常见问题</h2>
+<p><strong>预览黑屏 / 相机打不开</strong><br />
+检查是否授予相机权限；如果其他应用正在占用相机，先关闭它；仍不行时退出重进。</p>
+<p><strong>录像没有声音</strong><br />
+麦克风权限被拒绝。到系统设置 → 应用 → 呆瓜相机 → 权限，打开麦克风。</p>
+<p><strong>保存失败</strong><br />
+Android 9 及以下需要存储权限；同时确认手机剩余空间充足。</p>
+<p><strong>拍照处理失败</strong><br />
+应用会自动降级重试（关闭小精灵、降低分辨率）；如果相机原图始终拿不到，会改为保存当前预览画面并在弹窗中说明原因。</p>
+<p><strong>相册视频处理很久</strong><br />
+卡通化需要逐帧解码和重编码。只想保留原片时，把风格切到「正常」并关闭小精灵，会直接复制原视频。</p>
+<p><strong>换手机后设置没了</strong><br />
+风格、专业参数、场景等设置只保存在本机应用私有空间，卸载或换机不会同步。</p>
+<p><strong>想要更干净的画面</strong><br />
+风格选「正常」、关闭小精灵；需要更强效果时再提高卡通风格强度。</p>
+<hr />
+<h2 id="10-版本与反馈">10. 版本与反馈</h2>
+<ul>
+<li>当前版本：v1.10（versionCode 11）</li>
+<li>内置文档：点顶部「说明」，可离线查看 <strong>操作手册</strong> 和 <strong>更新说明</strong>，内容随 APK 一起安装</li>
+<li>历史更新：<a href="changelog.html">CHANGELOG.md</a></li>
+<li>项目与下载：<a href="https://github.com/haoliying/daigua-camera">https://github.com/haoliying/daigua-camera</a></li>
+<li>问题反馈：<a href="https://github.com/haoliying/daigua-camera/issues">https://github.com/haoliying/daigua-camera/issues</a></li>
+</ul>
+
+</main></body>
+</html>
