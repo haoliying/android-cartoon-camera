@@ -618,7 +618,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     public boolean onScaleBegin(ScaleGestureDetector detector) {
                         if (cameraController == null) return false;
                         if (!cameraController.isZoomKnown()) return false;
-                        zoomStart = cameraController.getZoom();
+                        zoomStart = displayZoom();
                         return true;
                     }
 
@@ -629,7 +629,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                         // 直接拿起始值相乘会导致倍数来回跳、捏合不跟手。
                         zoomStart *= detector.getScaleFactor();
                         applyZoom(zoomStart);
-                        zoomStart = cameraController.getZoom();
+                        zoomStart = displayZoom();
                         return true;
                     }
                 });
@@ -739,15 +739,28 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     // ------------------------------------------------------------------ 闪光灯 / 变焦
 
     private void cycleFlash() {
+        boolean needMainLens = false;
         if (cameraController != null && cameraController.isFlashKnown()
                 && !cameraController.hasFlash()) {
-            toast("这台相机没有闪光灯");
-            return;
+            // 超广角镜头本身没有闪光灯，但手机的主摄有：切回主摄再用
+            boolean backHasFlash = facing == CameraCharacteristics.LENS_FACING_BACK
+                    && cameraController.hasFlashOnBack();
+            if (!backHasFlash) {
+                toast("这台相机没有闪光灯");
+                return;
+            }
+            if (backLensId != null) {
+                needMainLens = true;
+            }
         }
         flashMode = (flashMode + 1) % 3;
         prefs.edit().putInt("flash", flashMode).apply();
         applyFlashState();
         updateFlashUi();
+        if (needMainLens) {
+            toast("广角镜头没有闪光灯，已切回主摄");
+            toggleWideLens(false);
+        }
         if (flashMode == FLASH_ON && captureMode == MODE_VIDEO) {
             toast("闪光灯：常开（录像时持续补光）");
         } else if (flashMode == FLASH_ON) {
@@ -770,7 +783,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private void updateFlashUi() {
         if (flashBtn == null) return;
         boolean known = cameraController != null && cameraController.isFlashKnown();
-        boolean supported = !known || cameraController.hasFlash();
+        boolean supported = !known || cameraController.hasFlash()
+                || (facing == CameraCharacteristics.LENS_FACING_BACK
+                    && cameraController != null && cameraController.hasFlashOnBack());
         String label = flashMode == FLASH_AUTO ? "自动" : (flashMode == FLASH_ON ? "常开" : "常闭");
         flashBtn.setText(flashMode == FLASH_AUTO ? FLASH_ICON
                 : FLASH_ICON + (flashMode == FLASH_ON ? "开" : "关"));
@@ -792,28 +807,68 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     /** 把相机当前的变焦值同步到焦距控制盘（捏合、切镜头、相机就绪时调用）。 */
     private void syncZoomUi() {
         if (zoomDial == null || cameraController == null) return;
-        float min = Math.max(0.1f, cameraController.minZoom());
-        zoomDial.setRange(min, 100f);
-        zoomDial.setZoom(cameraController.getZoom());
+        if (onWideLens()) {
+            zoomDial.setRange(0.1f, 1f);
+            zoomDial.setZoom(displayZoom());
+        } else {
+            float min = Math.max(0.1f, cameraController.minZoom());
+            zoomDial.setRange(min, 100f);
+            zoomDial.setZoom(cameraController.getZoom());
+        }
         if (renderer != null) renderer.setExtraZoom(cameraController.extraZoom());
         updateZoomChip();
         updateWideUi();
     }
 
+    private boolean onWideLens() {
+        return facing == CameraCharacteristics.LENS_FACING_BACK
+                && backLensId != null && wideLensId != null && backLensId.equals(wideLensId);
+    }
+
+    /** 广角镜头用 0.1×–1× 表示：1× 与主摄 1× 视野衔接，0.1× 是最广端。 */
+    private float wideNativeMax() {
+        float ratio = cameraController != null ? cameraController.wideFactor() : 0.55f;
+        ratio = Math.max(0.2f, Math.min(0.85f, ratio));
+        return 1f / ratio;
+    }
+
+    /** 相机内部倍率 → 控制盘显示的倍率。 */
+    private float displayZoom() {
+        if (cameraController == null) return 1f;
+        float nativeZoom = cameraController.getZoom();
+        if (!onWideLens()) return nativeZoom;
+        float n = wideNativeMax();
+        if (n <= 1.001f) return 1f;
+        double d = Math.exp(Math.log(Math.max(1f, nativeZoom)) * Math.log(10.0) / Math.log(n)) / 10.0;
+        return (float) Math.max(0.1, Math.min(1.0, d));
+    }
+
+    /** 控制盘显示的倍率 → 相机内部倍率。 */
+    private float nativeZoom(float display) {
+        if (!onWideLens()) return display;
+        float n = wideNativeMax();
+        float d = Math.max(0.1f, Math.min(1f, display));
+        float out = (float) Math.pow(d * 10.0, Math.log(n) / Math.log(10.0));
+        return Math.max(1f, Math.min(n, out));
+    }
+
     /** 统一入口：相机 + 渲染层软件放大 + 控制盘 + 收起后的小圆钮。 */
     private void applyZoom(float z) {
         if (cameraController == null) return;
-        cameraController.setZoom(z);
+        if (onWideLens()) {
+            cameraController.setZoom(nativeZoom(z));
+            if (zoomDial != null) zoomDial.setZoom(displayZoom());
+        } else {
+            cameraController.setZoom(z);
+            if (zoomDial != null) zoomDial.setZoom(cameraController.getZoom());
+        }
         if (renderer != null) renderer.setExtraZoom(cameraController.extraZoom());
-        if (zoomDial != null) zoomDial.setZoom(cameraController.getZoom());
         updateZoomChip();
     }
 
     private void updateZoomChip() {
         if (zoomChip == null || zoomDial == null) return;
-        float z = zoomDial.getZoom();
-        if (cameraController != null) z = cameraController.getZoom();
-        zoomChip.setText(zoomLabel(z));
+        zoomChip.setText(zoomLabel(cameraController != null ? displayZoom() : zoomDial.getZoom()));
     }
 
     private String zoomLabel(float z) {
@@ -2688,6 +2743,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void toggleWideLens() {
+        toggleWideLens(true);
+    }
+
+    private void toggleWideLens(boolean announce) {
         if (recording || recorderStarted) {
             toast("录制中无法切换镜头");
             return;
@@ -2696,7 +2755,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         cameraOpened = false;
         cameraController.closeAndWait();
         backLensId = backLensId == null ? wideLensId : null;
-        toast(backLensId != null ? "超广角镜头" : "后置主摄");
+        if (announce) {
+            toast(backLensId != null ? "超广角镜头" : "后置主摄");
+        }
         restartForLens();
     }
 

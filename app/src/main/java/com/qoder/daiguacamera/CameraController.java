@@ -87,6 +87,8 @@ public class CameraController {
     private volatile float ratioMax = 1f;
     /** 当前打开的具体摄像头 ID（后置主摄 / 后置广角可能是不同 ID）。 */
     private volatile String activeCameraId;
+    /** 超广角相对主摄的等效倍数，例如 0.55。 */
+    private volatile float wideFovRatio = 0.55f;
     private android.graphics.Rect activeArray;
     private final Runnable applyRepeatingRunnable = this::applyRepeating;
 
@@ -140,6 +142,7 @@ public class CameraController {
             String best = null;
             // 超广角至少要比主摄广 15°，且水平视场角普遍在 92° 以上，避免误认微距镜头
             float bestFov = Math.max(mainFov + 15f, 92f);
+            float bestRatio = 0.55f;
             for (String id : manager.getCameraIdList()) {
                 if (id.equals(mainId)) continue;
                 CameraCharacteristics c = manager.getCameraCharacteristics(id);
@@ -154,12 +157,36 @@ public class CameraController {
                 if (fov > bestFov) {
                     bestFov = fov;
                     best = id;
+                    float halfMain = (float) Math.tan(Math.toRadians(mainFov / 2.0));
+                    float halfWide = (float) Math.tan(Math.toRadians(fov / 2.0));
+                    if (halfWide > 1e-4f) {
+                        bestRatio = Math.max(0.15f, Math.min(0.9f, halfMain / halfWide));
+                    }
                 }
             }
+            if (best != null) wideFovRatio = bestRatio;
             return best;
         } catch (Throwable t) {
             Log.w(TAG, "findWideBackId", t);
             return null;
+        }
+    }
+
+    /** 超广角相对主摄的等效倍数（例如 0.55×），用于广角镜头的倍率换算。 */
+    public float wideFactor() {
+        return wideFovRatio;
+    }
+
+    /** 后置主摄是否有闪光灯；广角镜头常常没有，但手机的 LED 仍可借主摄使用。 */
+    public boolean hasFlashOnBack() {
+        try {
+            String id = findCameraId(CameraCharacteristics.LENS_FACING_BACK);
+            if (id == null) return false;
+            Boolean f = manager.getCameraCharacteristics(id)
+                    .get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
+            return f != null && f;
+        } catch (Throwable t) {
+            return false;
         }
     }
 
