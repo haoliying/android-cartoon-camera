@@ -1,0 +1,822 @@
+package com.qoder.cartooncamera;
+
+import android.graphics.SurfaceTexture;
+import android.opengl.EGL14;
+import android.opengl.EGLConfig;
+import android.opengl.EGLContext;
+import android.opengl.EGLDisplay;
+import android.opengl.EGLSurface;
+import android.opengl.GLES11Ext;
+import android.opengl.GLES20;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Looper;
+import android.util.Log;
+import android.util.Size;
+import android.view.Surface;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
+import java.util.HashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * 独立的 GL 渲染线程：相机 OES 纹理 -> 保边模糊 -> 卡通化 -> 预览 / 编码器。
+ * 预览与 MediaRecorder 的输入 Surface 共用同一个 EGL Context。
+ */
+public class CartoonRenderer {
+    private static final String TAG = "CartoonRenderer";
+    private static final int EGL_RECORDABLE_ANDROID = 0x3142;
+
+    public interface Callback {
+        void onCameraSurfaceReady(Surface surface, int frameWidth, int frameHeight);
+        void onError(String message);
+    }
+
+    public interface EncoderCallback {
+        void onEncoderReady();
+        void onEncoderError(String message);
+    }
+
+    public interface ErrorListener {
+        void onError(String message);
+    }
+
+    private HandlerThread thread;
+    private Handler handler;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private volatile ErrorListener errorListener;
+
+    private EGLDisplay eglDisplay = EGL14.EGL_NO_DISPLAY;
+    private EGLContext eglContext = EGL14.EGL_NO_CONTEXT;
+    private EGLConfig eglConfig;
+    private EGLSurface pbuffer = EGL14.EGL_NO_SURFACE;
+    private EGLSurface previewSurface = EGL14.EGL_NO_SURFACE;
+    private EGLSurface encoderSurface = EGL14.EGL_NO_SURFACE;
+
+    private int previewW, previewH;
+    private int encoderW, encoderH;
+
+    private int cameraTextureId;
+    private SurfaceTexture cameraTexture;
+    private Surface cameraSurface;
+
+    private int fboA, fboB, texA, texB, fboW, fboH;
+    private int quadBuf;
+    private Program progBlurOes, progBlurTex, progFinal;
+    private boolean frameScheduled;
+
+    private final float[] texMatrix = new float[16];
+    private volatile StylePreset style = StylePreset.ALL[0];
+    private volatile float intensity = 0.85f;
+    private volatile boolean mirror = false;
+
+    private final Runnable frameRunnable = this::renderFrame;
+
+    public void setErrorListener(ErrorListener listener) {
+        this.errorListener = listener;
+    }
+
+    public void setStyle(StylePreset preset, float intensity) {
+        this.style = preset;
+        this.intensity = intensity;
+    }
+
+    public void setMirror(boolean mirror) {
+        this.mirror = mirror;
+    }
+
+    // ------------------------------------------------------------------ lifecycle
+
+    public void start(Surface window, int width, int height) {
+        if (thread == null) {
+            thread = new HandlerThread("cartoon-gl");
+            thread.start();
+            handler = new Handler(thread.getLooper());
+        }
+        post(() -> {
+            if (eglDisplay == EGL14.EGL_NO_DISPLAY) {
+                if (!initEgl()) {
+                    notifyError("图形渲染初始化失败");
+                    return;
+                }
+            }
+            createPreviewSurface(window, width, height);
+        });
+    }
+
+    public void updatePreviewSize(int width, int height) {
+        post(() -> {
+            previewW = width;
+            previewH = height;
+        });
+    }
+
+    /** 在 GL 线程创建相机用的 SurfaceTexture / Surface。 */
+    public void createCameraSurface(Size cameraSize, boolean swapDims, Callback cb) {
+        post(() -> {
+            try {
+                if (eglDisplay == EGL14.EGL_NO_DISPLAY && !initEgl()) {
+                    throw new IllegalStateException("图形渲染未就绪");
+                }
+                makeCurrent(pbuffer);
+                releaseCameraTextureInternal();
+                createCameraTextureInternal(cameraSize);
+                int ow = swapDims ? cameraSize.getHeight() : cameraSize.getWidth();
+                int oh = swapDims ? cameraSize.getWidth() : cameraSize.getHeight();
+                ensureFbos(ow, oh);
+                if (cb != null) {
+                    final Surface s = cameraSurface;
+                    final int fw = ow, fh = oh;
+                    mainHandler.post(() -> cb.onCameraSurfaceReady(s, fw, fh));
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "createCameraSurface failed", t);
+                if (cb != null) {
+                    mainHandler.post(() -> cb.onError("相机画面初始化失败：" + t.getMessage()));
+                }
+            }
+        });
+    }
+
+    /** 释放 GL 线程、EGL 上下文以及所有 Surface（阻塞等待，保证 Surface 失效前清理完毕）。 */
+    public void release() {
+        final HandlerThread t = thread;
+        final Handler h = handler;
+        if (h == null) return;
+        final CountDownLatch latch = new CountDownLatch(1);
+        h.post(() -> {
+            try {
+                releaseAllInternal();
+            } catch (Throwable e) {
+                Log.e(TAG, "release failed", e);
+            } finally {
+                latch.countDown();
+            }
+            if (t != null) t.quitSafely();
+        });
+        try {
+            latch.await(800, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+        synchronized (this) {
+            if (thread == t) {
+                thread = null;
+                handler = null;
+            }
+        }
+    }
+
+    private void post(Runnable r) {
+        Handler h = handler;
+        if (h != null) h.post(r);
+    }
+
+    private void notifyError(String message) {
+        Log.e(TAG, message);
+        ErrorListener l = errorListener;
+        if (l != null) mainHandler.post(() -> l.onError(message));
+    }
+
+    // ------------------------------------------------------------------ encoder
+
+    public void startEncoder(Surface surface, int width, int height, EncoderCallback cb) {
+        post(() -> {
+            try {
+                if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglConfig == null) {
+                    throw new IllegalStateException("图形渲染未就绪");
+                }
+                destroyEncoderInternal();
+                int[] attribs = {EGL14.EGL_NONE};
+                EGLSurface es = EGL14.eglCreateWindowSurface(eglDisplay, eglConfig, surface, attribs, 0);
+                if (es == EGL14.EGL_NO_SURFACE) {
+                    throw new IllegalStateException("无法创建录像渲染表面");
+                }
+                if (!makeCurrent(es)) {
+                    EGL14.eglDestroySurface(eglDisplay, es);
+                    throw new IllegalStateException("无法激活录像渲染表面");
+                }
+                encoderSurface = es;
+                encoderW = width;
+                encoderH = height;
+                if (cb != null) mainHandler.post(cb::onEncoderReady);
+            } catch (Throwable t) {
+                Log.e(TAG, "startEncoder failed", t);
+                if (cb != null) {
+                    final String m = t.getMessage() == null ? "录像初始化失败" : t.getMessage();
+                    mainHandler.post(() -> cb.onEncoderError(m));
+                }
+            }
+        });
+    }
+
+    public void stopEncoder(Runnable done) {
+        post(() -> {
+            destroyEncoderInternal();
+            if (done != null) mainHandler.post(done);
+        });
+    }
+
+    // ------------------------------------------------------------------ GL init
+
+    private boolean initEgl() {
+        eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY) {
+            Log.e(TAG, "no EGL display");
+            return false;
+        }
+        int[] version = new int[2];
+        if (!EGL14.eglInitialize(eglDisplay, version, 0, version, 1)) {
+            eglDisplay = EGL14.EGL_NO_DISPLAY;
+            return false;
+        }
+
+        int[] withRecordable = {
+                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT | EGL14.EGL_PBUFFER_BIT,
+                EGL14.EGL_RED_SIZE, 8,
+                EGL14.EGL_GREEN_SIZE, 8,
+                EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8,
+                EGL_RECORDABLE_ANDROID, 1,
+                EGL14.EGL_NONE
+        };
+        int[] withoutRecordable = {
+                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT | EGL14.EGL_PBUFFER_BIT,
+                EGL14.EGL_RED_SIZE, 8,
+                EGL14.EGL_GREEN_SIZE, 8,
+                EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8,
+                EGL14.EGL_NONE
+        };
+        EGLConfig[] configs = new EGLConfig[1];
+        int[] num = new int[1];
+        boolean found = EGL14.eglChooseConfig(eglDisplay, withRecordable, 0, configs, 0, 1, num, 0)
+                && num[0] > 0;
+        if (!found) {
+            found = EGL14.eglChooseConfig(eglDisplay, withoutRecordable, 0, configs, 0, 1, num, 0)
+                    && num[0] > 0;
+        }
+        if (!found) {
+            Log.e(TAG, "no EGL config");
+            return false;
+        }
+        eglConfig = configs[0];
+
+        int[] ctxAttribs = {EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE};
+        eglContext = EGL14.eglCreateContext(eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, ctxAttribs, 0);
+        if (eglContext == EGL14.EGL_NO_CONTEXT) {
+            Log.e(TAG, "no EGL context");
+            return false;
+        }
+
+        int[] pbAttribs = {
+                EGL14.EGL_WIDTH, 1,
+                EGL14.EGL_HEIGHT, 1,
+                EGL14.EGL_NONE
+        };
+        pbuffer = EGL14.eglCreatePbufferSurface(eglDisplay, eglConfig, pbAttribs, 0);
+        if (pbuffer == EGL14.EGL_NO_SURFACE) {
+            Log.e(TAG, "no pbuffer");
+            return false;
+        }
+        if (!makeCurrent(pbuffer)) {
+            Log.e(TAG, "makeCurrent failed");
+            return false;
+        }
+
+        quadBuf = createQuadBuffer();
+        if (!buildPrograms()) return false;
+
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glClearColor(0.03f, 0.03f, 0.05f, 1f);
+        return true;
+    }
+
+    private boolean makeCurrent(EGLSurface surface) {
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglContext == EGL14.EGL_NO_CONTEXT) return false;
+        return EGL14.eglMakeCurrent(eglDisplay, surface, surface, eglContext);
+    }
+
+    private void createPreviewSurface(Surface window, int w, int h) {
+        destroyPreviewInternal();
+        if (window == null || !window.isValid() || w <= 0 || h <= 0) return;
+        int[] attribs = {EGL14.EGL_NONE};
+        previewSurface = EGL14.eglCreateWindowSurface(eglDisplay, eglConfig, window, attribs, 0);
+        if (previewSurface == EGL14.EGL_NO_SURFACE) {
+            previewSurface = EGL14.EGL_NO_SURFACE;
+            return;
+        }
+        previewW = w;
+        previewH = h;
+    }
+
+    private void createCameraTextureInternal(Size size) {
+        int[] t = new int[1];
+        GLES20.glGenTextures(1, t, 0);
+        cameraTextureId = t[0];
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTextureId);
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0);
+
+        cameraTexture = new SurfaceTexture(cameraTextureId);
+        cameraTexture.setDefaultBufferSize(size.getWidth(), size.getHeight());
+        Handler h = handler;
+        if (h != null) {
+            cameraTexture.setOnFrameAvailableListener(st -> {
+                if (!frameScheduled) {
+                    frameScheduled = true;
+                    Handler hh = handler;
+                    if (hh != null) hh.post(frameRunnable);
+                }
+            }, h);
+        }
+        cameraSurface = new Surface(cameraTexture);
+    }
+
+    private void releaseCameraTextureInternal() {
+        if (cameraSurface != null) {
+            cameraSurface.release();
+            cameraSurface = null;
+        }
+        if (cameraTexture != null) {
+            cameraTexture.setOnFrameAvailableListener(null);
+            cameraTexture.release();
+            cameraTexture = null;
+        }
+        if (cameraTextureId != 0) {
+            GLES20.glDeleteTextures(1, new int[]{cameraTextureId}, 0);
+            cameraTextureId = 0;
+        }
+    }
+
+    private void ensureFbos(int w, int h) {
+        if (w == fboW && h == fboH && texA != 0) return;
+        deleteFbos();
+        fboW = w;
+        fboH = h;
+        int[] tex = new int[2];
+        GLES20.glGenTextures(2, tex, 0);
+        texA = tex[0];
+        texB = tex[1];
+        for (int id : tex) {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id);
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0,
+                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        }
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+
+        int[] fbo = new int[2];
+        GLES20.glGenFramebuffers(2, fbo, 0);
+        fboA = fbo[0];
+        fboB = fbo[1];
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboA);
+        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                GLES20.GL_TEXTURE_2D, texA, 0);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboB);
+        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                GLES20.GL_TEXTURE_2D, texB, 0);
+        int status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            notifyError("离屏渲染缓冲创建失败");
+        }
+    }
+
+    private void deleteFbos() {
+        if (fboA != 0 || fboB != 0) {
+            GLES20.glDeleteFramebuffers(2, new int[]{fboA, fboB}, 0);
+            fboA = 0;
+            fboB = 0;
+        }
+        if (texA != 0 || texB != 0) {
+            GLES20.glDeleteTextures(2, new int[]{texA, texB}, 0);
+            texA = 0;
+            texB = 0;
+        }
+        fboW = 0;
+        fboH = 0;
+    }
+
+    private void destroyPreviewInternal() {
+        if (previewSurface != EGL14.EGL_NO_SURFACE && eglDisplay != EGL14.EGL_NO_DISPLAY) {
+            makeCurrent(pbuffer);
+            EGL14.eglDestroySurface(eglDisplay, previewSurface);
+        }
+        previewSurface = EGL14.EGL_NO_SURFACE;
+        previewW = 0;
+        previewH = 0;
+    }
+
+    private void destroyEncoderInternal() {
+        if (encoderSurface != EGL14.EGL_NO_SURFACE && eglDisplay != EGL14.EGL_NO_DISPLAY) {
+            makeCurrent(pbuffer);
+            EGL14.eglDestroySurface(eglDisplay, encoderSurface);
+        }
+        encoderSurface = EGL14.EGL_NO_SURFACE;
+        encoderW = 0;
+        encoderH = 0;
+    }
+
+    private void destroyEglInternal() {
+        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
+            if (eglContext != EGL14.EGL_NO_CONTEXT) {
+                EGL14.eglDestroyContext(eglDisplay, eglContext);
+            }
+            if (pbuffer != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglDestroySurface(eglDisplay, pbuffer);
+            }
+            EGL14.eglTerminate(eglDisplay);
+        }
+        eglContext = EGL14.EGL_NO_CONTEXT;
+        pbuffer = EGL14.EGL_NO_SURFACE;
+        eglDisplay = EGL14.EGL_NO_DISPLAY;
+        eglConfig = null;
+    }
+
+    private void releaseAllInternal() {
+        destroyEncoderInternal();
+        if (eglContext != EGL14.EGL_NO_CONTEXT) {
+            makeCurrent(pbuffer);
+        }
+        releaseCameraTextureInternal();
+        destroyPreviewInternal();
+        deleteFbos();
+        if (quadBuf != 0) {
+            GLES20.glDeleteBuffers(1, new int[]{quadBuf}, 0);
+            quadBuf = 0;
+        }
+        if (eglContext != EGL14.EGL_NO_CONTEXT) {
+            if (progBlurOes != null) progBlurOes.delete();
+            if (progBlurTex != null) progBlurTex.delete();
+            if (progFinal != null) progFinal.delete();
+        }
+        progBlurOes = null;
+        progBlurTex = null;
+        progFinal = null;
+        destroyEglInternal();
+    }
+
+    // ------------------------------------------------------------------ rendering
+
+    private void renderFrame() {
+        frameScheduled = false;
+        if (cameraTexture == null || eglDisplay == EGL14.EGL_NO_DISPLAY) return;
+        if (!makeCurrent(pbuffer)) return;
+        try {
+            cameraTexture.updateTexImage();
+            cameraTexture.getTransformMatrix(texMatrix);
+        } catch (Throwable t) {
+            return;
+        }
+        updateBlurPasses();
+        if (previewSurface != EGL14.EGL_NO_SURFACE && previewW > 0 && previewH > 0) {
+            blit(previewSurface, previewW, previewH);
+        }
+        if (encoderSurface != EGL14.EGL_NO_SURFACE && encoderW > 0 && encoderH > 0) {
+            blit(encoderSurface, encoderW, encoderH);
+        }
+    }
+
+    private void updateBlurPasses() {
+        if (fboA == 0 || fboB == 0 || cameraTextureId == 0) return;
+        StylePreset st = style;
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboA);
+        GLES20.glViewport(0, 0, fboW, fboH);
+        Program p1 = progBlurOes;
+        GLES20.glUseProgram(p1.id);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTextureId);
+        GLES20.glUniform1i(p1.u("uTex"), 0);
+        GLES20.glUniform2f(p1.u("uTexel"), 1f / fboW, 1f / fboH);
+        GLES20.glUniform2f(p1.u("uDir"), 1f, 0f);
+        GLES20.glUniform1f(p1.u("uRadius"), st.blur);
+        GLES20.glUniform1f(p1.u("uBilateral"), st.bilateral);
+        GLES20.glUniformMatrix4fv(p1.u("uTexMatrix"), 1, false, texMatrix, 0);
+        drawQuad(p1);
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboB);
+        GLES20.glViewport(0, 0, fboW, fboH);
+        Program p2 = progBlurTex;
+        GLES20.glUseProgram(p2.id);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texA);
+        GLES20.glUniform1i(p2.u("uTex"), 0);
+        GLES20.glUniform2f(p2.u("uTexel"), 1f / fboW, 1f / fboH);
+        GLES20.glUniform2f(p2.u("uDir"), 0f, 1f);
+        GLES20.glUniform1f(p2.u("uRadius"), st.blur);
+        GLES20.glUniform1f(p2.u("uBilateral"), st.bilateral);
+        drawQuad(p2);
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+    }
+
+    private void blit(EGLSurface target, int vw, int vh) {
+        if (!makeCurrent(target)) return;
+        GLES20.glViewport(0, 0, vw, vh);
+        StylePreset st = style;
+        Program p = progFinal;
+        GLES20.glUseProgram(p.id);
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTextureId);
+        GLES20.glUniform1i(p.u("uVideo"), 0);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texB);
+        GLES20.glUniform1i(p.u("uBlur"), 1);
+
+        float targetAspect = vw / (float) vh;
+        float sourceAspect = fboW / (float) fboH;
+        float cropX = 1f, cropY = 1f;
+        if (targetAspect < sourceAspect) {
+            cropX = targetAspect / sourceAspect;
+        } else {
+            cropY = sourceAspect / targetAspect;
+        }
+        float snap = st.pixel > 1f ? (st.pixel / fboW) : 0f;
+
+        GLES20.glUniform2f(p.u("uCrop"), cropX, cropY);
+        GLES20.glUniform1f(p.u("uMirror"), mirror ? 1f : 0f);
+        GLES20.glUniform1f(p.u("uSnap"), snap);
+        GLES20.glUniformMatrix4fv(p.u("uTexMatrix"), 1, false, texMatrix, 0);
+        GLES20.glUniform2f(p.u("uTexel"), 1f / fboW, 1f / fboH);
+        GLES20.glUniform1f(p.u("uDetail"), st.detail);
+        GLES20.glUniform1f(p.u("uLevels"), st.levels);
+        GLES20.glUniform1f(p.u("uSat"), st.sat);
+        GLES20.glUniform1f(p.u("uEdge"), st.edge);
+        GLES20.glUniform1f(p.u("uThresh"), st.thresh);
+        GLES20.glUniform1f(p.u("uEdgeWidth"), st.edgeWidth);
+        GLES20.glUniform1f(p.u("uHalftone"), st.halftone);
+        GLES20.glUniform1f(p.u("uGray"), st.gray);
+        GLES20.glUniform1f(p.u("uNeon"), st.neon);
+        GLES20.glUniform1f(p.u("uGrain"), st.grain);
+        GLES20.glUniform1f(p.u("uBright"), st.bright);
+        GLES20.glUniform1f(p.u("uSketch"), st.sketch);
+        GLES20.glUniform1f(p.u("uIntensity"), intensity);
+        GLES20.glUniform1f(p.u("uTime"), (System.nanoTime() % 1000000000L) / 1000000000f);
+        drawQuad(p);
+
+        EGL14.eglSwapBuffers(eglDisplay, target);
+    }
+
+    // ------------------------------------------------------------------ GL helpers
+
+    private int createQuadBuffer() {
+        float[] v = {
+                0f, 0f,
+                1f, 0f,
+                0f, 1f,
+                1f, 1f
+        };
+        FloatBuffer buf = ByteBuffer.allocateDirect(v.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        buf.put(v).position(0);
+        int[] id = new int[1];
+        GLES20.glGenBuffers(1, id, 0);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, id[0]);
+        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, v.length * 4, buf, GLES20.GL_STATIC_DRAW);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
+        return id[0];
+    }
+
+    private void drawQuad(Program p) {
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, quadBuf);
+        GLES20.glEnableVertexAttribArray(p.aPos);
+        GLES20.glVertexAttribPointer(p.aPos, 2, GLES20.GL_FLOAT, false, 0, 0);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(p.aPos);
+    }
+
+    private boolean buildPrograms() {
+        try {
+            progBlurOes = new Program(VS_CAMERA, FS_BLUR_OES);
+            progBlurTex = new Program(VS_PLAIN, FS_BLUR_TEX);
+            progFinal = new Program(VS_FINAL, FS_FINAL);
+            return true;
+        } catch (Throwable t) {
+            notifyError("滤镜着色器编译失败：" + t.getMessage());
+            return false;
+        }
+    }
+
+    private static String glsl(String... lines) {
+        return String.join("\n", lines);
+    }
+
+    private final class Program {
+        final int id;
+        final int aPos;
+        private final HashMap<String, Integer> locs = new HashMap<>();
+
+        Program(String vs, String fs) {
+            int v = loadShader(GLES20.GL_VERTEX_SHADER, vs);
+            int f = loadShader(GLES20.GL_FRAGMENT_SHADER, fs);
+            int pid = GLES20.glCreateProgram();
+            GLES20.glAttachShader(pid, v);
+            GLES20.glAttachShader(pid, f);
+            GLES20.glLinkProgram(pid);
+            int[] ok = new int[1];
+            GLES20.glGetProgramiv(pid, GLES20.GL_LINK_STATUS, ok, 0);
+            if (ok[0] == 0) {
+                String log = GLES20.glGetProgramInfoLog(pid);
+                GLES20.glDeleteProgram(pid);
+                throw new RuntimeException(log);
+            }
+            GLES20.glDeleteShader(v);
+            GLES20.glDeleteShader(f);
+            id = pid;
+            aPos = GLES20.glGetAttribLocation(pid, "aPos");
+        }
+
+        int u(String name) {
+            Integer l = locs.get(name);
+            if (l == null) {
+                l = GLES20.glGetUniformLocation(id, name);
+                locs.put(name, l);
+            }
+            return l;
+        }
+
+        void delete() {
+            GLES20.glDeleteProgram(id);
+        }
+    }
+
+    private static int loadShader(int type, String src) {
+        int shader = GLES20.glCreateShader(type);
+        GLES20.glShaderSource(shader, src);
+        GLES20.glCompileShader(shader);
+        int[] ok = new int[1];
+        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, ok, 0);
+        if (ok[0] == 0) {
+            String log = GLES20.glGetShaderInfoLog(shader);
+            GLES20.glDeleteShader(shader);
+            throw new RuntimeException("shader compile failed: " + log);
+        }
+        return shader;
+    }
+
+    // ------------------------------------------------------------------ shaders
+
+    private static final String VS_CAMERA = glsl(
+            "attribute vec2 aPos;",
+            "uniform mat4 uTexMatrix;",
+            "varying vec2 vUv;",
+            "void main() {",
+            "  vUv = (uTexMatrix * vec4(aPos, 0.0, 1.0)).xy;",
+            "  gl_Position = vec4(aPos * 2.0 - 1.0, 0.0, 1.0);",
+            "}"
+    );
+
+    private static final String VS_PLAIN = glsl(
+            "attribute vec2 aPos;",
+            "varying vec2 vUv;",
+            "void main() {",
+            "  vUv = aPos;",
+            "  gl_Position = vec4(aPos * 2.0 - 1.0, 0.0, 1.0);",
+            "}"
+    );
+
+    private static final String VS_FINAL = glsl(
+            "attribute vec2 aPos;",
+            "uniform vec2 uCrop;",
+            "uniform float uMirror;",
+            "varying vec2 vUv;",
+            "void main() {",
+            "  vec2 o = (aPos - 0.5) * uCrop + 0.5;",
+            "  if (uMirror > 0.5) { o.x = 1.0 - o.x; }",
+            "  vUv = o;",
+            "  gl_Position = vec4(aPos * 2.0 - 1.0, 0.0, 1.0);",
+            "}"
+    );
+
+    private static final String FS_BLUR_BODY = glsl(
+            "varying vec2 vUv;",
+            "uniform vec2 uTexel;",
+            "uniform vec2 uDir;",
+            "uniform float uRadius;",
+            "uniform float uBilateral;",
+            "float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }",
+            "void main() {",
+            "  vec2 d = uDir * uTexel * uRadius;",
+            "  vec3 c0 = texture2D(uTex, vUv).rgb;",
+            "  float l0 = luma(c0);",
+            "  vec3 sum = c0;",
+            "  float ws = 1.0;",
+            "  for (int i = 1; i <= 4; i++) {",
+            "    float fi = float(i);",
+            "    float w = 0.42 * pow(0.62, fi - 1.0);",
+            "    vec3 a = texture2D(uTex, vUv + d * fi).rgb;",
+            "    vec3 b = texture2D(uTex, vUv - d * fi).rgb;",
+            "    float la = luma(a);",
+            "    float lb = luma(b);",
+            "    float wa = w * exp(-((la - l0) * (la - l0)) * 90.0 * uBilateral);",
+            "    float wb = w * exp(-((lb - l0) * (lb - l0)) * 90.0 * uBilateral);",
+            "    sum += a * wa + b * wb;",
+            "    ws += wa + wb;",
+            "  }",
+            "  gl_FragColor = vec4(sum / ws, 1.0);",
+            "}"
+    );
+
+    private static final String FS_BLUR_OES = glsl(
+            "#extension GL_OES_EGL_image_external : require",
+            "precision mediump float;",
+            "uniform samplerExternalOES uTex;",
+            FS_BLUR_BODY
+    );
+
+    private static final String FS_BLUR_TEX = glsl(
+            "precision mediump float;",
+            "uniform sampler2D uTex;",
+            FS_BLUR_BODY
+    );
+
+    private static final String FS_FINAL = glsl(
+            "#extension GL_OES_EGL_image_external : require",
+            "precision mediump float;",
+            "varying vec2 vUv;",
+            "uniform samplerExternalOES uVideo;",
+            "uniform sampler2D uBlur;",
+            "uniform mat4 uTexMatrix;",
+            "uniform float uSnap;",
+            "uniform vec2 uTexel;",
+            "uniform float uDetail;",
+            "uniform float uLevels;",
+            "uniform float uSat;",
+            "uniform float uEdge;",
+            "uniform float uThresh;",
+            "uniform float uEdgeWidth;",
+            "uniform float uHalftone;",
+            "uniform float uGray;",
+            "uniform float uNeon;",
+            "uniform float uGrain;",
+            "uniform float uBright;",
+            "uniform float uSketch;",
+            "uniform float uIntensity;",
+            "uniform float uTime;",
+            "float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }",
+            "float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }",
+            "void main() {",
+            "  vec2 uv = vUv;",
+            "  if (uSnap > 0.0) { uv = (floor(uv / uSnap) + 0.5) * uSnap; }",
+            "  vec3 orig = texture2D(uVideo, (uTexMatrix * vec4(uv, 0.0, 1.0)).xy).rgb;",
+            "  vec3 base = mix(orig, texture2D(uBlur, uv).rgb, uDetail);",
+            "  vec2 e = uTexel * uEdgeWidth;",
+            "  float l1 = luma(texture2D(uBlur, uv + vec2(-e.x, -e.y)).rgb);",
+            "  float l2 = luma(texture2D(uBlur, uv + vec2(0.0, -e.y)).rgb);",
+            "  float l3 = luma(texture2D(uBlur, uv + vec2(e.x, -e.y)).rgb);",
+            "  float l4 = luma(texture2D(uBlur, uv + vec2(-e.x, 0.0)).rgb);",
+            "  float l5 = luma(texture2D(uBlur, uv + vec2(e.x, 0.0)).rgb);",
+            "  float l6 = luma(texture2D(uBlur, uv + vec2(-e.x, e.y)).rgb);",
+            "  float l7 = luma(texture2D(uBlur, uv + vec2(0.0, e.y)).rgb);",
+            "  float l8 = luma(texture2D(uBlur, uv + vec2(e.x, e.y)).rgb);",
+            "  float gx = (l3 + 2.0 * l5 + l8) - (l1 + 2.0 * l4 + l6);",
+            "  float gy = (l6 + 2.0 * l7 + l8) - (l1 + 2.0 * l2 + l3);",
+            "  float edge = smoothstep(uThresh, uThresh + 0.13, length(vec2(gx, gy)) * 0.25);",
+            "  base *= uBright;",
+            "  float lum = luma(base);",
+            "  base = mix(vec3(lum), base, uSat);",
+            "  if (uLevels >= 2.0) { base = floor(base * uLevels + 0.5) / uLevels; }",
+            "  if (uGray > 0.5) { base = vec3(luma(base)); }",
+            "  if (uSketch > 0.5) {",
+            "    float d = 1.0 - luma(base);",
+            "    d = smoothstep(0.04, 0.92, d);",
+            "    base = mix(vec3(0.97, 0.97, 0.95), vec3(0.10, 0.11, 0.14), d * d * 0.9);",
+            "  }",
+            "  if (uHalftone > 0.001) {",
+            "    vec2 p = uv / uTexel;",
+            "    float cs = 7.0;",
+            "    vec2 cc = (floor(p / cs) + 0.5) * cs;",
+            "    float dist = length(p - cc) / cs;",
+            "    float r = (1.0 - luma(base)) * 0.66;",
+            "    float dotm = smoothstep(r + 0.08, r - 0.08, dist);",
+            "    base = mix(base, vec3(0.04), clamp(dotm * uHalftone * 0.8, 0.0, 1.0));",
+            "  }",
+            "  base *= (1.0 - edge * uEdge);",
+            "  if (uNeon > 0.5) {",
+            "    vec3 glow = clamp(base * 3.0, 0.0, 1.0);",
+            "    vec3 ring = mix(vec3(0.15, 0.85, 1.0), vec3(1.0, 0.25, 0.75), smoothstep(0.2, 0.7, luma(base)));",
+            "    base = base * 0.18 + glow * 0.09 + ring * edge * 1.6;",
+            "  }",
+            "  if (uGrain > 0.001) {",
+            "    float n = hash(uv / uTexel + floor(uTime * 12.0));",
+            "    base += (n - 0.5) * uGrain * 0.5;",
+            "  }",
+            "  gl_FragColor = vec4(mix(orig, clamp(base, 0.0, 1.0), uIntensity), 1.0);",
+            "}"
+    );
+}
