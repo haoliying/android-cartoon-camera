@@ -11,6 +11,7 @@ import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
+import android.media.MediaMetadataRetriever;
 import android.media.MediaMuxer;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
@@ -113,13 +114,109 @@ public class GalleryProcessor {
         }
     }
 
+    /** 相册调色：照片走 CPU 像素管线，视频走同参数的 GLSL 逐帧管线。 */
+    public static void processAdjusted(Context ctx, Uri uri, String mime, AdjustPreset adjust,
+                                       AtomicBoolean cancel, Listener l) {
+        try {
+            if (mime == null) {
+                try {
+                    mime = ctx.getContentResolver().getType(uri);
+                } catch (Throwable ignored) {
+                }
+            }
+            if (mime == null) {
+                String n = uri.getLastPathSegment();
+                if (n != null) {
+                    n = n.toLowerCase(java.util.Locale.US);
+                    if (n.endsWith(".mp4") || n.endsWith(".mov") || n.endsWith(".m4v")
+                            || n.endsWith(".3gp") || n.endsWith(".mkv") || n.endsWith(".webm")
+                            || n.endsWith(".avi")) {
+                        mime = "video/*";
+                    }
+                }
+            }
+            if (mime != null && mime.startsWith("video/")) {
+                doVideo(ctx, uri, StylePreset.ALL[0], 1f, false, cancel, l,
+                        adjust == null ? AdjustPreset.ALL[0] : adjust);
+            } else {
+                doImageAdjusted(ctx, uri, adjust == null ? AdjustPreset.ALL[0] : adjust, cancel, l);
+            }
+        } catch (Cancelled c) {
+            l.onError("已取消");
+        } catch (Throwable t) {
+            Log.e(TAG, "processAdjusted failed", t);
+            String m = t.getMessage();
+            l.onError(m == null || m.isEmpty() ? "调色失败" : m);
+        }
+    }
+
+    /** 相册编辑器的预览帧：视频取第 0.5 秒的一帧，照片按比例缩到 maxSide 以内。 */
+    public static Bitmap loadEditPreview(Context ctx, Uri uri, String mime, int maxSide)
+            throws Exception {
+        Bitmap bmp;
+        if (mime != null && mime.startsWith("video/")) {
+            MediaMetadataRetriever r = new MediaMetadataRetriever();
+            try {
+                r.setDataSource(ctx, uri);
+                bmp = r.getFrameAtTime(500_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+            } finally {
+                try {
+                    r.release();
+                } catch (Throwable ignored) {
+                }
+            }
+            if (bmp == null) throw new IllegalStateException("无法读取这个视频的画面");
+        } else {
+            bmp = decodeImage(ctx.getContentResolver(), uri);
+        }
+        int w = bmp.getWidth();
+        int h = bmp.getHeight();
+        float scale = Math.min(1f, maxSide / (float) Math.max(w, h));
+        if (scale < 0.999f) {
+            int nw = Math.max(2, Math.round(w * scale));
+            int nh = Math.max(2, Math.round(h * scale));
+            Bitmap scaled = Bitmap.createScaledBitmap(bmp, nw, nh, true);
+            if (scaled != bmp) bmp.recycle();
+            bmp = scaled;
+        }
+        return bmp;
+    }
+
+    private static void doImageAdjusted(Context ctx, Uri uri, AdjustPreset adjust,
+                                        AtomicBoolean cancel, Listener l) {
+        l.onProgress(0.05f, "读取图片…");
+        Bitmap src = decodeImage(ctx.getContentResolver(), uri);
+        Bitmap out = null;
+        try {
+            if (cancel.get()) throw new Cancelled();
+            l.onProgress(0.35f, "调色中…");
+            out = MediaAdjust.apply(src, adjust);
+            if (cancel.get()) throw new Cancelled();
+            l.onProgress(0.85f, "保存到相册…");
+            String where = saveBitmap(ctx, out, "Daigua_EDIT_");
+            l.onProgress(1f, "完成");
+            l.onDone(where, out);
+            out = null;
+        } finally {
+            src.recycle();
+            if (out != null) out.recycle();
+        }
+    }
+
     /** 相机刚拍的 JPEG（原始传感器图像），同样走这条离线管线。 */
     public static void processJpegBytes(Context ctx, byte[] jpeg, StylePreset style,
                                         float intensity, boolean sprites, AtomicBoolean cancel,
                                         Listener l) {
+        processJpegBytes(ctx, jpeg, style, intensity, sprites, null, cancel, l);
+    }
+
+    /** 带底片参数的拍照：渲染完成后把负片外观套到成片上再保存。 */
+    public static void processJpegBytes(Context ctx, byte[] jpeg, StylePreset style,
+                                        float intensity, boolean sprites, NegativeParams negative,
+                                        AtomicBoolean cancel, Listener l) {
         try {
-            runJpeg(ctx, jpeg, style, intensity, sprites, cancel, l,
-                    MAX_IMAGE_SIDE, MAX_OUTPUT_SIDE, true);
+            runJpeg(ctx, jpeg, style, intensity, sprites, negative, cancel, l,
+                    MAX_IMAGE_SIDE, MAX_OUTPUT_SIDE, true, negative != null ? "Daigua_NEG_" : "Daigua_");
             return;
         } catch (Cancelled c) {
             l.onError("已取消");
@@ -129,8 +226,9 @@ public class GalleryProcessor {
         }
         // 兜底：原图数据特殊、显存/内存吃紧或小精灵层出错时，降一档重来（这次不带小精灵）
         try {
-            runJpeg(ctx, jpeg, style, intensity, false, cancel, l,
-                    MAX_IMAGE_SIDE / 2, MAX_OUTPUT_SIDE / 2, false);
+            runJpeg(ctx, jpeg, style, intensity, false, negative, cancel, l,
+                    MAX_IMAGE_SIDE / 2, MAX_OUTPUT_SIDE / 2, false,
+                    negative != null ? "Daigua_NEG_" : "Daigua_");
         } catch (Cancelled c) {
             l.onError("已取消");
         } catch (Throwable t) {
@@ -141,21 +239,28 @@ public class GalleryProcessor {
     }
 
     private static void runJpeg(Context ctx, byte[] jpeg, StylePreset style, float intensity,
-                                boolean sprites, AtomicBoolean cancel, Listener l,
-                                int maxSide, int maxOut, boolean checkBlack) {
+                                boolean sprites, NegativeParams negative, AtomicBoolean cancel,
+                                Listener l, int maxSide, int maxOut, boolean checkBlack,
+                                String prefix) {
         l.onProgress(0.05f, "读取照片…");
         Bitmap src = decodeJpeg(jpeg, maxSide);
         Bitmap out = null;
         try {
             if (cancel.get()) throw new Cancelled();
-            l.onProgress(0.3f, "卡通化…");
+            l.onProgress(0.3f, "处理中…");
             out = renderImage(src, style, intensity, sprites, maxOut);
+            if (negative != null) {
+                Bitmap neg = negative.apply(out);
+                out.recycle();
+                out = neg;
+            }
             if (cancel.get()) throw new Cancelled();
-            if (checkBlack && isBlack(out)) {
+            // 负片本来就是“反过来的画面”，亮场景会接近全黑，不能按黑屏判失败
+            if (checkBlack && negative == null && isBlack(out)) {
                 throw new IllegalStateException("渲染结果是黑屏，正在降级重试");
             }
             l.onProgress(0.85f, "保存到相册…");
-            String where = saveBitmap(ctx, out);
+            String where = saveBitmap(ctx, out, prefix);
             l.onProgress(1f, "完成");
             l.onDone(where, out);
             out = null;     // 交给界面显示预览
@@ -380,7 +485,13 @@ public class GalleryProcessor {
 
     private static void doVideo(Context ctx, Uri uri, StylePreset style, float intensity,
                                 boolean spritesOn, AtomicBoolean cancel, Listener l) {
-        if (style.normal && !spritesOn && isMp4(ctx, uri)) {
+        doVideo(ctx, uri, style, intensity, spritesOn, cancel, l, null);
+    }
+
+    private static void doVideo(Context ctx, Uri uri, StylePreset style, float intensity,
+                                boolean spritesOn, AtomicBoolean cancel, Listener l,
+                                AdjustPreset adjust) {
+        if (adjust == null && style.normal && !spritesOn && isMp4(ctx, uri)) {
             doVideoCopy(ctx, uri, cancel, l);
             return;
         }
@@ -495,7 +606,7 @@ public class GalleryProcessor {
             encoder.start();
             decoder.start();
 
-            l.onProgress(0.01f, "解码并卡通化…");
+            l.onProgress(0.01f, adjust != null ? "解码并调色…" : "解码并卡通化…");
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             boolean inputDone = false;
             boolean decoderEos = false;
@@ -536,8 +647,13 @@ public class GalleryProcessor {
                             float frameDt = lastPts > 0 ? (ptsUs - lastPts) / 1e6f : 1f / 30f;
                             if (frameDt <= 0f || frameDt > 0.2f) frameDt = 1f / 30f;
                             lastPts = ptsUs;
-                            gl.renderVideoFrame(outW, outH, srcW, srcH, texMatrix, style, intensity,
-                                    ptsUs * 1000L, spritesOn, frameDt);
+                            if (adjust != null) {
+                                gl.renderVideoFrameAdjust(outW, outH, srcW, srcH, texMatrix,
+                                        adjust, ptsUs * 1000L);
+                            } else {
+                                gl.renderVideoFrame(outW, outH, srcW, srcH, texMatrix, style, intensity,
+                                        ptsUs * 1000L, spritesOn, frameDt);
+                            }
                             if (audioTrackIndex >= 0 && audioExtractor != null) {
                                 try {
                                     copyAudioUpTo(audioExtractor, muxer, audioTrackIndex,
@@ -583,7 +699,8 @@ public class GalleryProcessor {
             muxer = null;
 
             l.onProgress(0.98f, "写入相册…");
-            String where = saveVideoFile(ctx, tmp, "Daigua_" + timestamp() + ".mp4");
+            String where = saveVideoFile(ctx, tmp,
+                    (adjust != null ? "Daigua_EDIT_" : "Daigua_") + timestamp() + ".mp4");
             //noinspection ResultOfMethodCallIgnored
             tmp.delete();
             tmp = null;
@@ -845,7 +962,11 @@ public class GalleryProcessor {
     }
 
     private static String saveBitmap(Context ctx, Bitmap bmp) {
-        String name = "Daigua_" + timestamp() + ".jpg";
+        return saveBitmap(ctx, bmp, "Daigua_");
+    }
+
+    private static String saveBitmap(Context ctx, Bitmap bmp, String prefix) {
+        String name = prefix + timestamp() + ".jpg";
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 ContentValues v = new ContentValues();
@@ -993,7 +1114,7 @@ public class GalleryProcessor {
         private EGLSurface encoderSurface = EGL14.EGL_NO_SURFACE;
 
         private int quad;
-        private Program pDownOes, pDown2d, pBlur, pFinalOes, pFinal2d, pPlainOes, pPlain2d;
+        private Program pDownOes, pDown2d, pBlur, pFinalOes, pFinal2d, pPlainOes, pPlain2d, pAdjustOes;
 
         private int fboA, texA, fboB, texB, fw, fh;
         private int oesTex;
@@ -1071,6 +1192,7 @@ public class GalleryProcessor {
             pFinal2d = new Program(CartoonRenderer.VS_FINAL, to2d(CartoonRenderer.FS_FINAL));
             pPlainOes = new Program(CartoonRenderer.VS_FINAL, CartoonRenderer.FS_PLAIN_OES);
             pPlain2d = new Program(CartoonRenderer.VS_FINAL, to2d(CartoonRenderer.FS_PLAIN_OES));
+            pAdjustOes = new Program(CartoonRenderer.VS_FINAL, FS_ADJUST);
 
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             GLES20.glDisable(GLES20.GL_BLEND);
@@ -1376,6 +1498,46 @@ public class GalleryProcessor {
             EGL14.eglSwapBuffers(display, encoderSurface);
         }
 
+        /** 调色视频帧：不做卡通平滑，直接把 OES 画面按调色参数写进编码器。 */
+        void renderVideoFrameAdjust(int outW, int outH, int srcW, int srcH, float[] texMatrix,
+                                    AdjustPreset adj, long ptsNs) {
+            if (!EGL14.eglMakeCurrent(display, encoderSurface, encoderSurface, context)) {
+                throw new IllegalStateException("编码器表面切换失败");
+            }
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            GLES20.glViewport(0, 0, outW, outH);
+            Program p = pAdjustOes;
+            if (p == null) throw new IllegalStateException("调色程序未就绪");
+            GLES20.glUseProgram(p.id);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTex);
+            GLES20.glUniform1i(p.u("uVideo"), 0);
+
+            float targetAspect = outW / (float) outH;
+            float sourceAspect = srcW / (float) srcH;
+            float cx = 1f, cy = 1f;
+            if (targetAspect < sourceAspect) cx = targetAspect / sourceAspect;
+            else cy = sourceAspect / targetAspect;
+            GLES20.glUniform2f(p.u("uCrop"), cx, cy);
+            GLES20.glUniform1f(p.u("uMirror"), 0f);
+            GLES20.glUniform1f(p.u("uFlipV"), 0f);
+            GLES20.glUniformMatrix4fv(p.u("uTexMatrix"), 1, false, texMatrix, 0);
+            GLES20.glUniform2f(p.u("uTexel"), 1f / srcW, 1f / srcH);
+            GLES20.glUniform1f(p.u("uInv"), adj.invert);
+            GLES20.glUniform1f(p.u("uAuto"), adj.auto ? 1f : 0f);
+            GLES20.glUniform1f(p.u("uBright"), adj.bright);
+            GLES20.glUniform1f(p.u("uContrast"), adj.contrast);
+            GLES20.glUniform1f(p.u("uSat"), adj.sat);
+            GLES20.glUniform1f(p.u("uTemp"), adj.temp);
+            GLES20.glUniform1f(p.u("uHue"), adj.hue);
+            GLES20.glUniform1f(p.u("uAberr"), adj.aberration);
+            GLES20.glUniform1f(p.u("uVignette"), adj.vignette);
+            GLES20.glUniform1f(p.u("uGrain"), adj.grain);
+            drawQuad(p);
+
+            EGLExt.eglPresentationTimeANDROID(display, encoderSurface, ptsNs);
+            EGL14.eglSwapBuffers(display, encoderSurface);
+        }
         private void bindFinalUniforms(Program p, StylePreset st, float intensity,
                                        float cx, float cy, float mirror, float flipV,
                                        int srcW, int srcH, int tw, int th, float snap,
@@ -1408,6 +1570,60 @@ public class GalleryProcessor {
         }
 
         // -------------------------------------------------------------- 小精灵
+
+        /** 相册调色：亮度/对比/饱和/色温/色相/色差/暗角/颗粒/底片转正，一次采样完成。 */
+        private static final String FS_ADJUST =
+                "#extension GL_OES_EGL_image_external : require\n"
+                        + "precision mediump float;\n"
+                        + "varying vec2 vUv;\n"
+                        + "uniform samplerExternalOES uVideo;\n"
+                        + "uniform mat4 uTexMatrix;\n"
+                        + "uniform vec2 uTexel;\n"
+                        + "uniform float uInv;\n"
+                        + "uniform float uAuto;\n"
+                        + "uniform float uBright;\n"
+                        + "uniform float uContrast;\n"
+                        + "uniform float uSat;\n"
+                        + "uniform float uTemp;\n"
+                        + "uniform float uHue;\n"
+                        + "uniform float uAberr;\n"
+                        + "uniform float uVignette;\n"
+                        + "uniform float uGrain;\n"
+                        + "float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }\n"
+                        + "float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n"
+                        + "vec3 hueShift(vec3 c, float deg) {\n"
+                        + "  float a = radians(deg);\n"
+                        + "  float s = sin(a), co = cos(a);\n"
+                        + "  mat3 m = mat3(\n"
+                        + "    0.299 + 0.701 * co + 0.168 * s, 0.299 - 0.299 * co - 0.328 * s, 0.299 - 0.300 * co + 1.250 * s,\n"
+                        + "    0.587 - 0.587 * co + 0.330 * s, 0.587 + 0.413 * co + 0.035 * s, 0.587 - 0.588 * co - 1.050 * s,\n"
+                        + "    0.114 - 0.114 * co - 0.497 * s, 0.114 - 0.114 * co + 0.292 * s, 0.114 + 0.886 * co - 0.203 * s);\n"
+                        + "  return clamp(m * c, 0.0, 1.0);\n"
+                        + "}\n"
+                        + "void main() {\n"
+                        + "  vec2 uv = vUv;\n"
+                        + "  vec2 d = uv - vec2(0.5);\n"
+                        + "  vec2 ab = vec2(uAberr * 0.006 * d.x, 0.0);\n"
+                        + "  vec3 c;\n"
+                        + "  c.r = texture2D(uVideo, (uTexMatrix * vec4(uv + ab, 0.0, 1.0)).xy).r;\n"
+                        + "  c.g = texture2D(uVideo, (uTexMatrix * vec4(uv, 0.0, 1.0)).xy).g;\n"
+                        + "  c.b = texture2D(uVideo, (uTexMatrix * vec4(uv - ab, 0.0, 1.0)).xy).b;\n"
+                        + "  if (uInv > 0.001) { c = mix(c, vec3(1.0) - c, uInv); }\n"
+                        + "  if (uAuto > 0.5) { c = mix(c, smoothstep(0.02, 0.98, c), 0.22); }\n"
+                        + "  c.r += uTemp * 0.12 + uBright * 0.35;\n"
+                        + "  c.b -= uTemp * 0.12 - uBright * 0.35;\n"
+                        + "  c.g += uBright * 0.28;\n"
+                        + "  c = (c - vec3(0.5)) * uContrast + vec3(0.5);\n"
+                        + "  float l = luma(c);\n"
+                        + "  c = mix(vec3(l), c, uSat * (uAuto > 0.5 ? 1.1 : 1.0));\n"
+                        + "  c = hueShift(c, uHue);\n"
+                        + "  float r = length(d) / 0.7071;\n"
+                        + "  c *= 1.0 - uVignette * 0.85 * r * r;\n"
+                        + "  if (uGrain > 0.001) {\n"
+                        + "    c += (hash(uv / uTexel) - 0.5) * uGrain * 0.35;\n"
+                        + "  }\n"
+                        + "  gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);\n"
+                        + "}";
 
         private static final String FS_COPY = "precision mediump float;\n"
                 + "uniform sampler2D uTex;\n"
@@ -1561,6 +1777,7 @@ public class GalleryProcessor {
             if (pFinal2d != null) pFinal2d.delete();
             if (pPlainOes != null) pPlainOes.delete();
             if (pPlain2d != null) pPlain2d.delete();
+            if (pAdjustOes != null) pAdjustOes.delete();
             if (encoderSurface != EGL14.EGL_NO_SURFACE) {
                 EGL14.eglDestroySurface(display, encoderSurface);
                 encoderSurface = EGL14.EGL_NO_SURFACE;

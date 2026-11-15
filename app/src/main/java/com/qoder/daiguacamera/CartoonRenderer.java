@@ -103,6 +103,8 @@ public class CartoonRenderer {
     private volatile StylePreset style = StylePreset.ALL[0];
     private volatile float intensity = 0.95f;
     private volatile boolean mirror = false;
+    /** 底片模式：非空时正常画面通道叠加负片外观；null 表示关闭。 */
+    private volatile NegativeParams negative;
 
     private final Runnable frameRunnable = this::renderFrame;
     private volatile FrameGrab pendingGrab;
@@ -114,6 +116,11 @@ public class CartoonRenderer {
     public void setStyle(StylePreset preset, float intensity) {
         this.style = preset;
         this.intensity = intensity;
+    }
+
+    /** 底片模式开关：传入参数即开启，传 null 关闭。 */
+    public void setNegative(NegativeParams params) {
+        this.negative = params;
     }
 
     public void setMirror(boolean mirror) {
@@ -720,6 +727,21 @@ public class CartoonRenderer {
         GLES20.glUniform2f(p.u("uCrop"), cx, cy);
         GLES20.glUniform1f(p.u("uMirror"), mirror ? 1f : 0f);
         GLES20.glUniformMatrix4fv(p.u("uTexMatrix"), 1, false, texMatrix, 0);
+
+        // 底片模式：只叠加在正常画面通道上（风格通道仍按用户选择工作）
+        NegativeParams ng = negative;
+        GLES20.glUniform2f(p.u("uTexel"), 1f / fboW, 1f / fboH);
+        GLES20.glUniform1f(p.u("uTime"), animTime);
+        GLES20.glUniform1f(p.u("uNegOn"), ng != null ? 1f : 0f);
+        if (ng != null) {
+            GLES20.glUniform1f(p.u("uNegInv"), ng.invert);
+            GLES20.glUniform1f(p.u("uNegMask"), ng.mask);
+            GLES20.glUniform1f(p.u("uNegContrast"), ng.contrast);
+            GLES20.glUniform1f(p.u("uNegSat"), ng.saturation);
+            GLES20.glUniform1f(p.u("uNegGrain"), ng.grain);
+            GLES20.glUniform1f(p.u("uNegHue"), ng.hue);
+            GLES20.glUniform1f(p.u("uNegLift"), ng.lift);
+        }
         if (!plain) {
             float snap = st.pixel > 1f ? (st.pixel / fboW) : 0f;
             GLES20.glUniform1f(p.u("uSnap"), snap);
@@ -1155,8 +1177,43 @@ public class CartoonRenderer {
             "varying vec2 vUv;",
             "uniform samplerExternalOES uVideo;",
             "uniform mat4 uTexMatrix;",
+            "uniform vec2 uTexel;",
+            "uniform float uTime;",
+            "uniform float uNegOn;",
+            "uniform float uNegInv;",
+            "uniform float uNegMask;",
+            "uniform float uNegContrast;",
+            "uniform float uNegSat;",
+            "uniform float uNegGrain;",
+            "uniform float uNegHue;",
+            "uniform float uNegLift;",
+            "float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }",
+            "float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }",
+            "vec3 hueShift(vec3 c, float deg) {",
+            "  float a = radians(deg);",
+            "  float s = sin(a), co = cos(a);",
+            "  mat3 m = mat3(",
+            "    0.299 + 0.701 * co + 0.168 * s, 0.299 - 0.299 * co - 0.328 * s, 0.299 - 0.300 * co + 1.250 * s,",
+            "    0.587 - 0.587 * co + 0.330 * s, 0.587 + 0.413 * co + 0.035 * s, 0.587 - 0.588 * co - 1.050 * s,",
+            "    0.114 - 0.114 * co - 0.497 * s, 0.114 - 0.114 * co + 0.292 * s, 0.114 + 0.886 * co - 0.203 * s);",
+            "  return clamp(m * c, 0.0, 1.0);",
+            "}",
             "void main() {",
-            "  gl_FragColor = vec4(texture2D(uVideo, (uTexMatrix * vec4(vUv, 0.0, 1.0)).xy).rgb, 1.0);",
+            "  vec3 c = texture2D(uVideo, (uTexMatrix * vec4(vUv, 0.0, 1.0)).xy).rgb;",
+            "  if (uNegOn > 0.5) {",
+            "    vec3 inv = mix(c, vec3(1.0) - c, uNegInv);",
+            "    vec3 orange = vec3(0.95, 0.52, 0.20);",
+            "    inv = mix(inv, orange * (vec3(0.35) + 0.65 * inv), clamp(uNegMask, 0.0, 1.0) * 0.8);",
+            "    float l = luma(inv);",
+            "    inv = vec3(l) + (inv - vec3(l)) * uNegSat;",
+            "    inv = hueShift(inv, uNegHue);",
+            "    inv = (inv - vec3(0.5)) * uNegContrast + vec3(0.5) + uNegLift;",
+            "    if (uNegGrain > 0.001) {",
+            "      inv += (hash(vUv / uTexel) - 0.5) * uNegGrain * 0.5;",
+            "    }",
+            "    c = clamp(inv, 0.0, 1.0);",
+            "  }",
+            "  gl_FragColor = vec4(c, 1.0);",
             "}"
     );
 

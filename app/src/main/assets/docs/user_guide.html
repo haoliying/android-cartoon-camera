@@ -32,13 +32,13 @@ strong { color: #ffffff; }
 </head>
 <body><main>
 <h1 id="呆瓜相机--操作手册">呆瓜相机 · 操作手册</h1>
-<p>适用版本：<strong>v1.18</strong>（versionCode 19）<br />
+<p>适用版本：<strong>v1.19</strong>（versionCode 20）<br />
 系统要求：Android 7.0 及以上<br />
 包名：<code>com.qoder.daiguacamera</code></p>
 <hr />
 <h2 id="1-安装与首次启动">1. 安装与首次启动</h2>
 <ol>
-<li>安装 <code>daigua-camera-v1.18.apk</code>。如果手机提示“未知来源”，允许当前文件管理器安装即可。</li>
+<li>安装 <code>daigua-camera-v1.19.apk</code>。如果手机提示“未知来源”，允许当前文件管理器安装即可。</li>
 <li>首次打开会申请 <strong>相机</strong> 和 <strong>麦克风</strong> 权限：
 <ul>
 <li>相机：必需，否则无法预览和拍摄。</li>
@@ -78,7 +78,7 @@ strong { color: #ffffff; }
 <ul>
 <li><strong>收起把手</strong>：面板最上方有一条短横线和「收起」字样，点一下整块控制区会缩到屏幕最下方，只留下这条把手，画面可视范围最大；再点一下「展开」恢复。</li>
 <li><strong>第一层 · 拍摄方式</strong>：通栏分段按钮「录像 / 拍照」。录像中不能切换。</li>
-<li><strong>第二层 · 模式</strong>：「普通 / 专业 / 傻瓜」，等宽三个标签，录像和拍照各自独立记忆。</li>
+<li><strong>第二层 · 模式</strong>：「普通 / 专业 / 傻瓜 / 底片」，等宽标签，录像和拍照各自独立记忆；「底片」只在拍照时出现。</li>
 <li><strong>第三层 · 风格与参数</strong>：左侧「风格 · 当前风格 ▾」打开风格面板；右侧在专业模式显示「专业参数 · …」，傻瓜模式显示当前场景名，点一下即可调整。</li>
 <li><strong>快门行</strong>：左「相册」、中快门、右「⇄」切换前后摄像头。</li>
 <li><strong>快门键</strong>：录像时是红色圆点，拍照时是白色圆点。</li>
@@ -93,6 +93,7 @@ strong { color: #ffffff; }
 <li><strong>普通</strong>：全自动曝光、白平衡和对焦，开箱即用。</li>
 <li><strong>专业</strong>：点右侧「专业参数」，可手动设置 ISO、快门、曝光补偿、白平衡、对焦；录像快门最长 1/30 秒，超过会自动限制，保证画面流畅不掉帧。</li>
 <li><strong>傻瓜</strong>：27 个场景任选，点场景名切换，和拍照共用同一套场景参数。</li>
+<li>「底片」只在拍照模式提供，录像下不显示。</li>
 </ul></li>
 <li>点一次快门开始录制，顶部出现红点和计时。</li>
 <li>再点一次快门停止。视频会<strong>直接保存到相册</strong>，不再弹“已保存”提示或预览。</li>
@@ -105,7 +106,7 @@ strong { color: #ffffff; }
 </blockquote>
 <hr />
 <h2 id="4-拍照">4. 拍照</h2>
-<p>点「拍照」后，可在三种子模式中选择。</p>
+<p>点「拍照」后，可在四种模式中选择：普通、专业、傻瓜、底片。</p>
 <h3 id="41-普通">4.1 普通</h3>
 <p>全自动曝光、自动白平衡、自动对焦，适合随手拍。拍完按当前风格处理并保存到 <code>Pictures/DaiguaCamera</code>。</p>
 <h3 id="42-专业">4.2 专业</h3>
@@ -178,6 +179,49 @@ strong { color: #ffffff; }
 <li>列表里的标记：<code>·自</code> 表示自定义场景，<code>·调</code> 表示参数被改过。</li>
 </ul>
 <p>场景参数只影响曝光、白平衡、对焦，不改变卡通风格。</p>
+<h3 id="44-底片">4.4 底片</h3>
+<p>底片模式拍摄的是<strong>负片</strong>：预览就是反相后的画面，按下快门保存的也是负片文件（文件名 <code>Daigua_NEG_…jpg</code>），之后可以在相册里一键转成正常照片。</p>
+<p>点右侧「底片参数」，可调：</p>
+<table>
+<thead>
+<tr class="header">
+<th>参数</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>反转强度</td>
+<td>0%–100%，100% 是完全负片</td>
+</tr>
+<tr class="even">
+<td>橙色底罩</td>
+<td>模拟彩色负片未曝光区域的橙色，0% 为中性反相</td>
+</tr>
+<tr class="odd">
+<td>对比度</td>
+<td>60%–140%</td>
+</tr>
+<tr class="even">
+<td>饱和度</td>
+<td>0%–160%，调到 0 就是黑白底片</td>
+</tr>
+<tr class="odd">
+<td>色相</td>
+<td>-40°–+40° 色彩偏移</td>
+</tr>
+<tr class="even">
+<td>颗粒</td>
+<td>0%–50% 胶片颗粒</td>
+</tr>
+<tr class="odd">
+<td>亮度</td>
+<td>-20–+20</td>
+</tr>
+</tbody>
+</table>
+<p>参数会实时作用在预览上，并记在本机，下次进入底片模式沿用。底片模式固定按正常画面反相，不叠加「风格」面板里的卡通风格；风格入口会自动隐藏。</p>
+<p>拍完的底片可以在相册里选「底片转成片」：自动反相并中和橙色底罩，再按需要微调。</p>
 <hr />
 <h2 id="5-闪光灯与变焦">5. 闪光灯与变焦</h2>
 <h3 id="51-闪光灯">5.1 闪光灯</h3>
@@ -295,17 +339,79 @@ strong { color: #ffffff; }
 </ul>
 <p>建议：想要干净的照片就保持关闭；想要“呆瓜”一点的效果再打开。</p>
 <hr />
-<h2 id="8-相册处理">8. 相册处理</h2>
+<h2 id="8-相册调色">8. 相册调色</h2>
 <ol>
 <li>点快门行左侧的「相册」，选择一张图片或一段视频。</li>
-<li>按当前的风格、强度和小精灵开关处理，弹窗显示进度，可随时取消。</li>
-<li>完成后自动保存，图片会弹出预览。</li>
+<li>打开调色编辑器：上方是预览，中间是模式标签，下面是参数滑块。</li>
+<li>调好后点「保存成片」，处理完成会提示保存位置；图片会弹出预览。</li>
 </ol>
-<p>处理规则：</p>
+<p><strong>模式（点一下即套用）</strong></p>
+<table>
+<thead>
+<tr class="header">
+<th>模式</th>
+<th>效果</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>原图</td>
+<td>不做任何调整</td>
+</tr>
+<tr class="even">
+<td>自动优化</td>
+<td>自动色阶 + 轻微提饱和，适合曝光平淡的照片</td>
+</tr>
+<tr class="odd">
+<td>鲜明</td>
+<td>提高对比和饱和度</td>
+</tr>
+<tr class="even">
+<td>柔和</td>
+<td>低对比、低饱和、轻微颗粒</td>
+</tr>
+<tr class="odd">
+<td>黑白</td>
+<td>去色 + 提高对比 + 轻暗角</td>
+</tr>
+<tr class="even">
+<td>复古 / 胶片</td>
+<td>暖调、低饱和、颗粒与暗角</td>
+</tr>
+<tr class="odd">
+<td>冷调 / 暖调</td>
+<td>整体色温偏移</td>
+</tr>
+<tr class="even">
+<td>青橙</td>
+<td>轻微色相偏移 + 暗角，电影感</td>
+</tr>
+<tr class="odd">
+<td>底片转成片</td>
+<td>反相并中和橙色底罩，专治底片模式拍的文件</td>
+</tr>
+</tbody>
+</table>
+<p><strong>参数滑块</strong></p>
 <ul>
-<li><strong>图片</strong>：最长边 1600，保存为 JPEG 到 <code>Pictures/DaiguaCamera</code>。</li>
-<li><strong>视频</strong>：最长边 1280，重编码为 mp4 到 <code>Movies/DaiguaCamera</code>，原音轨会保留。</li>
-<li><strong>正常 + 小精灵关闭</strong>：图片直接复制（超过 1600 会缩到 1600），mp4 视频直接原样复制、不重新编码，速度最快、画质无损。</li>
+<li>亮度、对比度、饱和度</li>
+<li>色温（负值偏冷、正值偏暖）</li>
+<li>色觉 / 色相（-180°–+180°）</li>
+<li>色差（红蓝通道左右分离，模拟镜头色差）</li>
+<li>暗角、颗粒</li>
+<li>底片转成片（0%–100%，任何照片都能反相）</li>
+</ul>
+<p><strong>保存与复用</strong></p>
+<ul>
+<li>点「存为模式」，给当前这组参数起个名字，就会出现在模式标签末尾（带 <code>·自</code>），以后一键套用；长按自定义模式可删除。</li>
+<li>打开文件名带 <code>Daigua_NEG_</code> 的底片时，会自动选中「底片转成片」。</li>
+<li>编辑器里的「卡通化（当前风格）」保留原来的相册卡通化：按当前风格、强度和小精灵开关处理。</li>
+</ul>
+<p><strong>处理规则</strong></p>
+<ul>
+<li><strong>照片</strong>：调色后保存为 JPEG 到 <code>Pictures/DaiguaCamera</code>，文件名为 <code>Daigua_EDIT_…jpg</code>；实时预览最长边约 900，成片最长边 1600。</li>
+<li><strong>视频</strong>：逐帧调色后重编码为 mp4 到 <code>Movies/DaiguaCamera</code>，原音轨保留；最长边 1280，耗时比照片长。</li>
+<li>视频的「自动优化」使用固定增强曲线（逐帧统计直方图代价太高），照片则按整张图自动计算黑白场。</li>
 <li>处理视频会调用硬件编解码，机身发热、耗电属于正常现象。</li>
 </ul>
 <hr />
@@ -321,6 +427,14 @@ strong { color: #ffffff; }
 <tr class="odd">
 <td>拍照 / 相册图片</td>
 <td><code>Pictures/DaiguaCamera</code></td>
+</tr>
+<tr class="even">
+<td>底片照片</td>
+<td><code>Pictures/DaiguaCamera</code>，文件名带 <code>Daigua_NEG_</code></td>
+</tr>
+<tr class="odd">
+<td>相册调色照片</td>
+<td><code>Pictures/DaiguaCamera</code>，文件名带 <code>Daigua_EDIT_</code></td>
 </tr>
 <tr class="even">
 <td>拍照原图（开启保存原素材时）</td>
@@ -348,7 +462,7 @@ Android 9 及以下需要存储权限；同时确认手机剩余空间充足。<
 <p><strong>拍照处理失败</strong><br />
 应用会自动降级重试（关闭小精灵、降低分辨率）；如果相机原图始终拿不到，会改为保存当前预览画面并在弹窗中说明原因。</p>
 <p><strong>相册视频处理很久</strong><br />
-卡通化需要逐帧解码和重编码。只想保留原片时，把风格切到「正常」并关闭小精灵，会直接复制原视频。</p>
+调色 / 卡通化都需要逐帧解码和重编码。只想保留原片时，在相册编辑器里点「取消」，或使用「卡通化（当前风格）」前把风格切到「正常」并关闭小精灵，会直接复制原视频。</p>
 <p><strong>闪光灯不亮</strong><br />
 先看顶部 ⚡ 是否是「常闭」；前置摄像头一般没有闪光灯；专业模式手动曝光时「自动」不会闪，请切到「常开」。</p>
 <p><strong>双指捏合不能变焦</strong><br />
@@ -362,7 +476,7 @@ Android 9 及以下需要存储权限；同时确认手机剩余空间充足。<
 <hr />
 <h2 id="11-版本与反馈">11. 版本与反馈</h2>
 <ul>
-<li>当前版本：v1.18（versionCode 19）</li>
+<li>当前版本：v1.19（versionCode 20）</li>
 <li>内置文档：点顶部「说明」，可离线查看 <strong>操作手册</strong> 和 <strong>更新说明</strong>，内容随 APK 一起安装</li>
 <li>历史更新：<a href="changelog.html">CHANGELOG.md</a></li>
 <li>项目与下载：<a href="https://github.com/haoliying/daigua-camera">https://github.com/haoliying/daigua-camera</a></li>

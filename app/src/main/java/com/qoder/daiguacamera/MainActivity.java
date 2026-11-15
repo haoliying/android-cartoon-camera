@@ -130,6 +130,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final int SUB_NORMAL = 0;
     private static final int SUB_PRO = 1;
     private static final int SUB_IDIOT = 2;
+    /** 底片：只在拍照模式提供，画面反相成负片。 */
+    private static final int SUB_NEGATIVE = 3;
 
     private int captureMode = MODE_VIDEO;
     private int photoSub = SUB_NORMAL;
@@ -146,7 +148,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final long VIDEO_MAX_EXPOSURE_NS = 1_000_000_000L / 30;
 
     private TextView videoPill, photoPill;
-    private TextView subNormalPill, subProPill, subIdiotPill;
+    private TextView subNormalPill, subProPill, subIdiotPill, subNegativePill;
+    private NegativeParams negativeParams;
+    private AdjustStore adjustStore;
     private LinearLayout extraRow;
     private TextView extraActionBtn;
     private TextView flashBtn;
@@ -197,6 +201,23 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private boolean pendingPhoto;
     private boolean previewFallbackBusy;
 
+    // 相册调色编辑器
+    private AlertDialog adjustDialog;
+    private ImageView adjustPreviewView;
+    private Bitmap adjustPreviewBase;
+    private Bitmap adjustPreviewShown;
+    private int adjustPreviewGen;
+    private AdjustPreset adjustCurrent;
+    private boolean adjustIsVideo;
+    private String adjustMime;
+    private Uri adjustUri;
+    private TextView adjustInfo;
+    private LinearLayout adjustChipRow;
+    private final List<TextView> adjustChips = new ArrayList<>();
+    private SeekBar[] adjustBars;
+    private Runnable adjustPreviewDebounce;
+    private boolean adjustSyncing;
+
     private MediaRecorder recorder;
     private boolean recording = false;
     private boolean recorderStarted = false;
@@ -244,6 +265,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         sceneList = sceneStore.scenes();
         scene = sceneStore.find(prefs.getString("scene", null));
         videoScene = sceneStore.find(prefs.getString("video_scene", null));
+        negativeParams = NegativeParams.load(prefs);
+        adjustStore = new AdjustStore(this);
 
         renderer = new CartoonRenderer();
         renderer.setErrorListener(msg -> ui.post(() -> toast(msg)));
@@ -253,6 +276,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         buildUi();
         updateModeUi();
+        applyRenderStyle();
         applyCameraParams();
         applyFlashState();
         updateFlashUi();
@@ -512,6 +536,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         subIdiotPill = modeTab("傻瓜", false);
         subIdiotPill.setOnClickListener(v -> setSub(SUB_IDIOT));
         subRow.addView(subIdiotPill, new LinearLayout.LayoutParams(0, WRAP, 1f));
+
+        subNegativePill = modeTab("底片", false);
+        subNegativePill.setContentDescription("负片拍摄模式，拍摄后可到相册转成照片");
+        subNegativePill.setOnClickListener(v -> setSub(SUB_NEGATIVE));
+        subRow.addView(subNegativePill, new LinearLayout.LayoutParams(0, WRAP, 1f));
 
         panelContent.addView(subRow, new LinearLayout.LayoutParams(MATCH, WRAP));
 
@@ -977,7 +1006,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     private void selectStyle(StylePreset preset) {
         style = preset;
-        renderer.setStyle(style, intensity);
+        applyRenderStyle();
         for (int i = 0; i < chips.size(); i++) {
             TextView chip = chips.get(i);
             boolean active = i < StylePreset.ALL.length && StylePreset.ALL[i] == preset;
@@ -1049,7 +1078,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 if (intensityValue != null) {
                     intensityValue.setText("卡通强度：" + progress + "%");
                 }
-                renderer.setStyle(style, intensity);
+                applyRenderStyle();
             }
 
             @Override
@@ -1275,19 +1304,21 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void startPhotoProcess(byte[] jpeg) {
-        final StylePreset st = style;
-        final float in = intensity;
-        final boolean spr = spritesOn;
+        final boolean negMode = negativeMode();
+        final StylePreset st = negMode ? StylePreset.ALL[0] : style;
+        final float in = negMode ? 1f : intensity;
+        final boolean spr = negMode ? false : spritesOn;
+        final NegativeParams neg = negMode ? negativeParams.copy() : null;
         // 软件变焦部分（超过设备上限）在照片上也要按同样比例裁切
         final float extra = cameraController != null ? cameraController.extraZoom() : 1f;
         // 非正常风格且开启了“保存原素材”：先把相机原始 JPEG 原样存一份
-        final boolean saveRaw = saveOriginal && !st.normal;
+        final boolean saveRaw = !negMode && saveOriginal && !st.normal;
         final AtomicBoolean cancel = new AtomicBoolean(false);
         processing = true;
         processingCancel = cancel;
 
         final AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle(st.normal ? "保存照片" : "照片卡通化")
+                .setTitle(negMode ? "保存底片" : (st.normal ? "保存照片" : "照片卡通化"))
                 .setMessage("处理中…")
                 .setNegativeButton("取消", (d, w) -> cancel.set(true))
                 .setCancelable(false)
@@ -1313,7 +1344,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     Log.e(TAG, "save original jpeg", t);
                 }
             }
-            GalleryProcessor.processJpegBytes(this, shot, st, in, spr, cancel,
+            GalleryProcessor.processJpegBytes(this, shot, st, in, spr, neg, cancel,
                 new GalleryProcessor.Listener() {
                     @Override
                     public void onProgress(float p, String label) {
@@ -1531,6 +1562,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         captureMode = mode;
         prefs.edit().putInt("captureMode", captureMode).apply();
         updateModeUi();
+        applyRenderStyle();
         applyFlashState();
         applyCameraParams();
     }
@@ -1541,17 +1573,39 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             toast("录制中不能切换模式，先停止录像");
             return;
         }
-        if (captureMode == MODE_PHOTO) {
-            if (sub == photoSub) return;
-            photoSub = sub;
-            prefs.edit().putInt("photoSub", photoSub).apply();
-        } else {
+        if (captureMode == MODE_VIDEO) {
+            if (sub == SUB_NEGATIVE) {
+                toast("底片模式只支持拍照，请先切到拍照");
+                return;
+            }
             if (sub == videoSub) return;
             videoSub = sub;
             prefs.edit().putInt("videoSub", videoSub).apply();
+        } else {
+            if (sub == photoSub) return;
+            photoSub = sub;
+            prefs.edit().putInt("photoSub", photoSub).apply();
         }
         updateModeUi();
+        applyRenderStyle();
         applyCameraParams();
+    }
+
+    /** 是否处于拍照 · 底片模式。 */
+    private boolean negativeMode() {
+        return captureMode == MODE_PHOTO && photoSub == SUB_NEGATIVE;
+    }
+
+    /** 底片模式强制使用正常画面通道，再叠加负片外观；其他模式恢复用户选的风格。 */
+    private void applyRenderStyle() {
+        if (renderer == null) return;
+        if (negativeMode()) {
+            renderer.setStyle(StylePreset.ALL[0], 1f);
+            renderer.setNegative(negativeParams == null ? new NegativeParams() : negativeParams.copy());
+        } else {
+            renderer.setStyle(style, intensity);
+            renderer.setNegative(null);
+        }
     }
 
     private int currentSub() {
@@ -1567,6 +1621,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         styleModeTab(subNormalPill, sub == SUB_NORMAL);
         styleModeTab(subProPill, sub == SUB_PRO);
         styleModeTab(subIdiotPill, sub == SUB_IDIOT);
+        styleModeTab(subNegativePill, sub == SUB_NEGATIVE);
+        // 底片只在拍照模式出现；录像下这一格自动让给另外三个模式
+        subNegativePill.setVisibility(photo ? View.VISIBLE : View.GONE);
 
         GradientDrawable d = (GradientDrawable) recordInner.getBackground();
         if (d != null) {
@@ -1580,7 +1637,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private void updateExtraUi() {
         if (extraRow == null) return;
         extraRow.setVisibility(View.VISIBLE);
-        if (styleBtn != null) styleBtn.setText("风格 · " + style.name + " ▾");
+        if (styleBtn != null) {
+            styleBtn.setText("风格 · " + style.name + " ▾");
+            styleBtn.setVisibility(negativeMode() ? View.GONE : View.VISIBLE);
+        }
 
         int sub = currentSub();
         if (sub == SUB_PRO) {
@@ -1597,6 +1657,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             ScenePreset sp = curScene();
             String mark = sp.custom ? " ·自" : (sp.edited ? " ·调" : "");
             extraActionBtn.setText(sp.name + mark + " ▾");
+        } else if (sub == SUB_NEGATIVE) {
+            extraActionBtn.setVisibility(View.VISIBLE);
+            extraActionBtn.setText("底片参数 · " + negativeParams.summary() + " ▾");
         } else {
             extraActionBtn.setVisibility(View.GONE);
         }
@@ -1607,7 +1670,99 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             showProDialog();
         } else if (currentSub() == SUB_IDIOT) {
             showSceneDialog();
+        } else if (currentSub() == SUB_NEGATIVE) {
+            showNegativeDialog();
         }
+    }
+
+    // ------------------------------------------------------------------ 底片参数
+
+    /** 底片模式的成像参数：反转、橙色底罩、对比、饱和、颗粒、色相、亮度。 */
+    private void showNegativeDialog() {
+        final NegativeParams p = negativeParams.copy();
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(8), dp(20), dp(4));
+
+        TextView tip = new TextView(this);
+        tip.setText("预览实时生效。饱和调到 0 就是黑白底片；拍完的照片可在相册里“底片转成片”。");
+        tip.setTextColor(0xFF9AA0B2);
+        tip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        tip.setPadding(0, 0, 0, dp(4));
+        box.addView(tip);
+
+        String[] pct = new String[11];
+        for (int i = 0; i < pct.length; i++) pct[i] = (i * 10) + "%";
+        String[] con = new String[17];
+        for (int i = 0; i < con.length; i++) con[i] = (60 + i * 5) + "%";
+        String[] sat = new String[17];
+        for (int i = 0; i < sat.length; i++) sat[i] = (i * 10) + "%";
+        String[] grain = new String[11];
+        for (int i = 0; i < grain.length; i++) grain[i] = (i * 5) + "%";
+        String[] hue = new String[17];
+        for (int i = 0; i < hue.length; i++) {
+            int v = -40 + i * 5;
+            hue[i] = (v > 0 ? "+" : "") + v + "°";
+        }
+        String[] lift = new String[9];
+        for (int i = 0; i < lift.length; i++) {
+            int v = -20 + i * 5;
+            lift[i] = (v > 0 ? "+" : "") + v;
+        }
+
+        addSeek(box, "反转强度", pct, Math.round(p.invert * 10), v -> {
+            p.invert = v / 10f;
+            applyNegative(p);
+        });
+        addSeek(box, "橙色底罩", pct, Math.round(p.mask * 10), v -> {
+            p.mask = v / 10f;
+            applyNegative(p);
+        });
+        addSeek(box, "对比度", con, Math.round((p.contrast * 100f - 60f) / 5f), v -> {
+            p.contrast = (60 + v * 5) / 100f;
+            applyNegative(p);
+        });
+        addSeek(box, "饱和度", sat, Math.round(p.saturation * 10f), v -> {
+            p.saturation = v / 10f;
+            applyNegative(p);
+        });
+        addSeek(box, "色相", hue, Math.round((p.hue + 40f) / 5f), v -> {
+            p.hue = -40 + v * 5;
+            applyNegative(p);
+        });
+        addSeek(box, "颗粒", grain, Math.round(p.grain * 20f), v -> {
+            p.grain = v / 20f;
+            applyNegative(p);
+        });
+        addSeek(box, "亮度", lift, Math.round((p.lift * 100f + 20f) / 5f), v -> {
+            p.lift = (-20 + v * 5) / 100f;
+            applyNegative(p);
+        });
+
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(box);
+
+        AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("底片参数")
+                .setView(scroll)
+                .setPositiveButton("完成", null)
+                .create();
+        dlg.setOnDismissListener(d -> {
+            negativeParams = p;
+            p.save(prefs);
+            applyRenderStyle();
+            updateExtraUi();
+        });
+        dlg.show();
+    }
+
+    private void applyNegative(NegativeParams p) {
+        negativeParams = p;
+        if (renderer != null && negativeMode()) {
+            renderer.setNegative(p.copy());
+        }
+        updateExtraUi();
     }
 
     private CaptureParams currentParams() {
@@ -1759,8 +1914,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         void set(int value);
     }
 
-    private void addSeek(LinearLayout parent, String label, String[] labels, int index,
-                         IntSink sink) {
+    private SeekBar addSeek(LinearLayout parent, String label, String[] labels, int index,
+                            IntSink sink) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.VERTICAL);
         row.setPadding(0, dp(6), 0, dp(2));
@@ -1793,6 +1948,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         });
         row.addView(bar, new LinearLayout.LayoutParams(MATCH, WRAP));
         parent.addView(row, new LinearLayout.LayoutParams(MATCH, WRAP));
+        return bar;
     }
 
     private static final int[] ISO_VALUES = {0, 100, 200, 400, 800, 1600, 3200, 6400};
@@ -2444,7 +2600,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_WRITE);
             return;
         }
-        beginGallery(uri);
+        openGalleryEditor(uri);
     }
 
     private void beginGallery(Uri uri) {
@@ -2499,6 +2655,504 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                         });
                     }
                 }));
+    }
+
+    // ------------------------------------------------------------------ 相册调色
+
+    private static final int AJ_BRIGHT = 0, AJ_CONTRAST = 1, AJ_SAT = 2, AJ_TEMP = 3,
+            AJ_HUE = 4, AJ_ABERR = 5, AJ_VIGNETTE = 6, AJ_GRAIN = 7, AJ_INVERT = 8;
+    private static final float[] AJ_MIN = {-100, 60, 0, -100, -180, 0, 0, 0, 0};
+    private static final float[] AJ_MAX = {100, 160, 200, 100, 180, 100, 100, 100, 100};
+    private static final float[] AJ_STEP = {10, 5, 10, 10, 15, 5, 5, 5, 10};
+
+    /** 点相册后先读一帧预览，再打开调色编辑器。 */
+    private void openGalleryEditor(Uri uri) {
+        if (processing || capturing) {
+            toast("正在处理，请稍候");
+            return;
+        }
+        processing = true;
+        if (galleryBtn != null) galleryBtn.setAlpha(0.4f);
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("相册")
+                .setMessage("正在读取…")
+                .setCancelable(false)
+                .create();
+        progressDialog = dialog;
+        dialog.show();
+        worker.execute(() -> {
+            String mime = null;
+            String name = "";
+            Bitmap base = null;
+            String error = null;
+            try {
+                mime = getContentResolver().getType(uri);
+                name = displayNameOf(uri);
+                base = GalleryProcessor.loadEditPreview(this, uri, mime, 900);
+            } catch (Throwable t) {
+                Log.e(TAG, "load edit preview", t);
+                error = t.getMessage() == null ? "无法读取这个文件" : t.getMessage();
+            }
+            final String fm = mime;
+            final String fn = name;
+            final Bitmap fb = base;
+            final String fe = error;
+            ui.post(() -> {
+                finishProcessing();
+                if (isFinishing() || isDestroyed()) {
+                    if (fb != null) fb.recycle();
+                    return;
+                }
+                if (fb == null) {
+                    toast(fe == null ? "无法读取这个文件" : fe);
+                    return;
+                }
+                showGalleryEditor(uri, fm, fn, fb);
+            });
+        });
+    }
+
+    private String displayNameOf(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri,
+                new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) {
+                    String n = c.getString(idx);
+                    if (n != null && !n.isEmpty()) return n;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        String n = uri.getLastPathSegment();
+        return n == null ? "相册文件" : n;
+    }
+
+    private void showGalleryEditor(Uri uri, String mime, String name, Bitmap base) {
+        releaseAdjustPreview();
+        adjustUri = uri;
+        adjustMime = mime;
+        adjustIsVideo = mime != null && mime.startsWith("video/");
+        adjustPreviewBase = base;
+
+        // 底片拍出来的文件自动选“底片转成片”，否则沿用上次用的模式
+        String lower = name == null ? "" : name.toLowerCase(Locale.US);
+        AdjustPreset start = null;
+        if (lower.contains("_neg_") || lower.contains("neg")) {
+            start = AdjustPreset.byId("negative").copy();
+        } else {
+            String last = prefs.getString("last_adjust", "none");
+            for (AdjustPreset p : AdjustPreset.ALL) {
+                if (p.id.equals(last)) start = p.copy();
+            }
+            if (start == null) {
+                AdjustPreset c = adjustStore.find(last);
+                if (c != null) start = c.copy();
+            }
+        }
+        adjustCurrent = start == null ? AdjustPreset.ALL[0].copy() : start;
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(16), dp(8), dp(16), dp(8));
+
+        adjustInfo = new TextView(this);
+        adjustInfo.setText((adjustIsVideo ? "视频" : "照片") + " · " + name
+                + (adjustIsVideo ? "\n视频保存时会重新编码，耗时较长" : ""));
+        adjustInfo.setTextColor(0xFF9AA0B2);
+        adjustInfo.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        content.addView(adjustInfo, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        adjustPreviewView = new ImageView(this);
+        adjustPreviewView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        GradientDrawable pvBg = new GradientDrawable();
+        pvBg.setColor(0x22000000);
+        pvBg.setCornerRadius(dp(12));
+        adjustPreviewView.setBackground(pvBg);
+        LinearLayout.LayoutParams pvLp = new LinearLayout.LayoutParams(MATCH, dp(190));
+        pvLp.topMargin = dp(6);
+        content.addView(adjustPreviewView, pvLp);
+
+        // 预设模式：内置 + 用户保存的
+        android.widget.HorizontalScrollView chipScroll =
+                new android.widget.HorizontalScrollView(this);
+        chipScroll.setHorizontalScrollBarEnabled(false);
+        adjustChipRow = new LinearLayout(this);
+        adjustChipRow.setOrientation(LinearLayout.HORIZONTAL);
+        adjustChipRow.setPadding(0, dp(8), dp(8), dp(4));
+        chipScroll.addView(adjustChipRow, new LinearLayout.LayoutParams(WRAP, WRAP));
+        content.addView(chipScroll, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        SeekBar[] bars = new SeekBar[9];
+        final LinearLayout[] holder = new LinearLayout[1];
+        String[] bLabels = adjustLabels(AJ_MIN[0], AJ_MAX[0], AJ_STEP[0], true, "%");
+        String[] cLabels = adjustLabels(AJ_MIN[1], AJ_MAX[1], AJ_STEP[1], false, "%");
+        String[] sLabels = adjustLabels(AJ_MIN[2], AJ_MAX[2], AJ_STEP[2], false, "%");
+        String[] tLabels = adjustLabels(AJ_MIN[3], AJ_MAX[3], AJ_STEP[3], true, "");
+        String[] hLabels = adjustLabels(AJ_MIN[4], AJ_MAX[4], AJ_STEP[4], true, "°");
+        String[] abLabels = adjustLabels(AJ_MIN[5], AJ_MAX[5], AJ_STEP[5], false, "%");
+        String[] vLabels = adjustLabels(AJ_MIN[6], AJ_MAX[6], AJ_STEP[6], false, "%");
+        String[] gLabels = adjustLabels(AJ_MIN[7], AJ_MAX[7], AJ_STEP[7], false, "%");
+        String[] iLabels = adjustLabels(AJ_MIN[8], AJ_MAX[8], AJ_STEP[8], false, "%");
+
+        holder[0] = new LinearLayout(this);
+        holder[0].setOrientation(LinearLayout.VERTICAL);
+        bars[AJ_BRIGHT] = addSeek(holder[0], "亮度", bLabels, ajIndex(adjustCurrent, AJ_BRIGHT),
+                v -> {
+                    adjustCurrent.bright = (AJ_MIN[0] + v * AJ_STEP[0]) / 100f;
+                    onAdjustChanged();
+                });
+        bars[AJ_CONTRAST] = addSeek(holder[0], "对比度", cLabels,
+                ajIndex(adjustCurrent, AJ_CONTRAST), v -> {
+                    adjustCurrent.contrast = (AJ_MIN[1] + v * AJ_STEP[1]) / 100f;
+                    onAdjustChanged();
+                });
+        bars[AJ_SAT] = addSeek(holder[0], "饱和度", sLabels, ajIndex(adjustCurrent, AJ_SAT),
+                v -> {
+                    adjustCurrent.sat = (AJ_MIN[2] + v * AJ_STEP[2]) / 100f;
+                    onAdjustChanged();
+                });
+        bars[AJ_TEMP] = addSeek(holder[0], "色温（负冷正暖）", tLabels,
+                ajIndex(adjustCurrent, AJ_TEMP), v -> {
+                    adjustCurrent.temp = (AJ_MIN[3] + v * AJ_STEP[3]) / 100f;
+                    onAdjustChanged();
+                });
+        bars[AJ_HUE] = addSeek(holder[0], "色觉 / 色相", hLabels, ajIndex(adjustCurrent, AJ_HUE),
+                v -> {
+                    adjustCurrent.hue = AJ_MIN[4] + v * AJ_STEP[4];
+                    onAdjustChanged();
+                });
+        bars[AJ_ABERR] = addSeek(holder[0], "色差", abLabels, ajIndex(adjustCurrent, AJ_ABERR),
+                v -> {
+                    adjustCurrent.aberration = (AJ_MIN[5] + v * AJ_STEP[5]) / 100f;
+                    onAdjustChanged();
+                });
+        bars[AJ_VIGNETTE] = addSeek(holder[0], "暗角", vLabels,
+                ajIndex(adjustCurrent, AJ_VIGNETTE), v -> {
+                    adjustCurrent.vignette = (AJ_MIN[6] + v * AJ_STEP[6]) / 100f;
+                    onAdjustChanged();
+                });
+        bars[AJ_GRAIN] = addSeek(holder[0], "颗粒", gLabels, ajIndex(adjustCurrent, AJ_GRAIN),
+                v -> {
+                    adjustCurrent.grain = (AJ_MIN[7] + v * AJ_STEP[7]) / 100f;
+                    onAdjustChanged();
+                });
+        bars[AJ_INVERT] = addSeek(holder[0], "底片转成片", iLabels,
+                ajIndex(adjustCurrent, AJ_INVERT), v -> {
+                    adjustCurrent.invert = (AJ_MIN[8] + v * AJ_STEP[8]) / 100f;
+                    onAdjustChanged();
+                });
+        content.addView(holder[0], new LinearLayout.LayoutParams(MATCH, WRAP));
+        adjustBars = bars;
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setPadding(0, dp(8), 0, 0);
+
+        TextView saveMode = pill("存为模式", false);
+        saveMode.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        saveMode.setPadding(dp(10), dp(7), dp(10), dp(8));
+        saveMode.setOnClickListener(v -> promptSaveAdjustMode());
+        actions.addView(saveMode, new LinearLayout.LayoutParams(0, WRAP, 1f));
+
+        TextView cartoon = pill("卡通化（当前风格）", false);
+        cartoon.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        cartoon.setPadding(dp(10), dp(7), dp(10), dp(8));
+        cartoon.setOnClickListener(v -> {
+            Uri u = adjustUri;
+            if (u == null) return;
+            if (adjustDialog != null) adjustDialog.dismiss();
+            beginGallery(u);
+        });
+        LinearLayout.LayoutParams cartLp = new LinearLayout.LayoutParams(0, WRAP, 1f);
+        cartLp.leftMargin = dp(8);
+        actions.addView(cartoon, cartLp);
+        content.addView(actions, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        android.widget.ScrollView page = new android.widget.ScrollView(this);
+        page.addView(content);
+
+        adjustDialog = new AlertDialog.Builder(this)
+                .setTitle("调色 · " + (adjustIsVideo ? "视频" : "照片"))
+                .setView(page)
+                .setPositiveButton("保存成片", (d, w) -> saveAdjusted())
+                .setNegativeButton("取消", null)
+                .create();
+        adjustDialog.setOnDismissListener(d -> releaseAdjustPreview());
+        adjustDialog.show();
+
+        buildAdjustChips(bars);
+        bindAdjustBars(bars);
+        refreshAdjustChips();
+        scheduleAdjustPreview();
+    }
+
+    private static String[] adjustLabels(float min, float max, float step, boolean signed,
+                                         String suffix) {
+        int n = Math.round((max - min) / step) + 1;
+        String[] a = new String[n];
+        for (int i = 0; i < n; i++) {
+            float v = min + i * step;
+            a[i] = (signed ? String.format(Locale.US, "%+.0f", v)
+                    : String.format(Locale.US, "%.0f", v)) + suffix;
+        }
+        return a;
+    }
+
+    private static int ajIndex(AdjustPreset p, int which) {
+        float v;
+        switch (which) {
+            case AJ_BRIGHT:
+                v = p.bright * 100f;
+                break;
+            case AJ_CONTRAST:
+                v = p.contrast * 100f;
+                break;
+            case AJ_SAT:
+                v = p.sat * 100f;
+                break;
+            case AJ_TEMP:
+                v = p.temp * 100f;
+                break;
+            case AJ_HUE:
+                v = p.hue;
+                break;
+            case AJ_ABERR:
+                v = p.aberration * 100f;
+                break;
+            case AJ_VIGNETTE:
+                v = p.vignette * 100f;
+                break;
+            case AJ_GRAIN:
+                v = p.grain * 100f;
+                break;
+            default:
+                v = p.invert * 100f;
+                break;
+        }
+        int idx = Math.round((v - AJ_MIN[which]) / AJ_STEP[which]);
+        int max = Math.round((AJ_MAX[which] - AJ_MIN[which]) / AJ_STEP[which]);
+        return Math.max(0, Math.min(max, idx));
+    }
+
+    private void bindAdjustBars(SeekBar[] bars) {
+        if (bars == null || adjustCurrent == null) return;
+        adjustSyncing = true;
+        for (int i = 0; i < bars.length; i++) {
+            if (bars[i] != null) bars[i].setProgress(ajIndex(adjustCurrent, i));
+        }
+        adjustSyncing = false;
+    }
+
+    private void onAdjustChanged() {
+        if (adjustSyncing) return;
+        adjustCurrent.id = "draft";
+        refreshAdjustChips();
+        scheduleAdjustPreview();
+    }
+
+    private void buildAdjustChips(SeekBar[] bars) {
+        if (adjustChipRow == null) return;
+        adjustChipRow.removeAllViews();
+        adjustChips.clear();
+        List<AdjustPreset> all = new ArrayList<>();
+        for (AdjustPreset p : AdjustPreset.ALL) all.add(p);
+        all.addAll(adjustStore.custom());
+        for (final AdjustPreset p : all) {
+            String label = p.name + (p.custom ? " ·自" : "");
+            TextView b = pill(label, adjustCurrent != null && p.id.equals(adjustCurrent.id));
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+            b.setPadding(dp(12), dp(7), dp(12), dp(8));
+            b.setTag(p.id);
+            b.setOnClickListener(v -> {
+                adjustCurrent = p.copy();
+                bindAdjustBars(bars);
+                refreshAdjustChips();
+                scheduleAdjustPreview();
+            });
+            if (p.custom) {
+                b.setOnLongClickListener(v -> {
+                    confirmDeleteAdjust(p);
+                    return true;
+                });
+            }
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(WRAP, WRAP);
+            lp.rightMargin = dp(8);
+            adjustChipRow.addView(b, lp);
+            adjustChips.add(b);
+        }
+    }
+
+    private void refreshAdjustChips() {
+        String id = adjustCurrent == null ? "" : adjustCurrent.id;
+        for (TextView t : adjustChips) {
+            Object tag = t.getTag();
+            boolean active = tag != null && tag.equals(id);
+            t.setBackground(chipBg(active));
+            t.setTextColor(active ? 0xFFFFFFFF : 0xFFE9EAF2);
+            t.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+        }
+    }
+
+    private void scheduleAdjustPreview() {
+        if (adjustPreviewBase == null || adjustPreviewView == null) return;
+        final int gen = ++adjustPreviewGen;
+        final AdjustPreset p = adjustCurrent.copy();
+        final Bitmap base = adjustPreviewBase;
+        ui.removeCallbacks(adjustPreviewDebounce);
+        adjustPreviewDebounce = () -> worker.execute(() -> {
+            Bitmap out;
+            try {
+                out = MediaAdjust.apply(base, p);
+            } catch (Throwable t) {
+                Log.e(TAG, "adjust preview", t);
+                return;
+            }
+            ui.post(() -> {
+                if (gen != adjustPreviewGen || adjustDialog == null
+                        || !adjustDialog.isShowing() || adjustPreviewView == null) {
+                    out.recycle();
+                    return;
+                }
+                Bitmap old = adjustPreviewShown;
+                adjustPreviewShown = out;
+                adjustPreviewView.setImageBitmap(out);
+                if (old != null && old != base && old != out) old.recycle();
+            });
+        });
+        ui.postDelayed(adjustPreviewDebounce, 90);
+    }
+
+    private void promptSaveAdjustMode() {
+        if (adjustCurrent == null) return;
+        EditText et = new EditText(this);
+        et.setHint("模式名称，例如 我的胶片");
+        et.setSingleLine(true);
+        new AlertDialog.Builder(this)
+                .setTitle("存为调整模式")
+                .setMessage("保存当前所有参数，之后在相册调色里一键复用。")
+                .setView(et)
+                .setPositiveButton("保存", (d, w) -> {
+                    String nm = et.getText().toString().trim();
+                    if (nm.isEmpty()) nm = "我的模式" + (adjustStore.custom().size() + 1);
+                    AdjustPreset p = adjustCurrent.copy();
+                    p.name = nm;
+                    p.auto = false;
+                    adjustStore.add(p);
+                    adjustCurrent = p;
+                    if (adjustBars != null) {
+                        buildAdjustChips(adjustBars);
+                        bindAdjustBars(adjustBars);
+                    }
+                    refreshAdjustChips();
+                    toast("已存为模式 · " + nm);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void confirmDeleteAdjust(AdjustPreset p) {
+        new AlertDialog.Builder(this)
+                .setTitle("删除模式")
+                .setMessage("确定删除「" + p.name + "」吗？")
+                .setPositiveButton("删除", (d, w) -> {
+                    adjustStore.remove(p);
+                    if (adjustCurrent != null && adjustCurrent.id.equals(p.id)) {
+                        adjustCurrent.id = "draft";
+                    }
+                    if (adjustBars != null) buildAdjustChips(adjustBars);
+                    refreshAdjustChips();
+                    toast("已删除 · " + p.name);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void saveAdjusted() {
+        if (processing || adjustCurrent == null || adjustUri == null) return;
+        final Uri uri = adjustUri;
+        final String mime = adjustMime;
+        final AdjustPreset p = adjustCurrent.copy();
+        prefs.edit().putString("last_adjust", p.id).apply();
+        if (p.id.startsWith("u")) {
+            // 自定义模式：把当前参数也同步回仓库，下次打开还是这套
+            AdjustPreset stored = adjustStore.find(p.id);
+            if (stored != null) {
+                AdjustPreset upd = p.copy();
+                upd.id = stored.id;
+                upd.name = stored.name;
+                adjustStore.update(upd);
+            }
+        }
+        if (adjustDialog != null) adjustDialog.dismiss();
+
+        processing = true;
+        final AtomicBoolean cancel = new AtomicBoolean(false);
+        processingCancel = cancel;
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(adjustIsVideo ? "视频调色中" : "照片调色中")
+                .setMessage("准备中…")
+                .setNegativeButton("取消", (d, w) -> cancel.set(true))
+                .setCancelable(false)
+                .create();
+        progressDialog = dialog;
+        dialog.show();
+
+        worker.execute(() -> GalleryProcessor.processAdjusted(this, uri, mime, p, cancel,
+                new GalleryProcessor.Listener() {
+                    @Override
+                    public void onProgress(float progress, String label) {
+                        ui.post(() -> {
+                            if (progressDialog != null && progressDialog.isShowing()) {
+                                progressDialog.setMessage(label);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onDone(String message, Bitmap preview) {
+                        ui.post(() -> {
+                            finishProcessing();
+                            if (isFinishing() || isDestroyed()) {
+                                if (preview != null) preview.recycle();
+                                return;
+                            }
+                            if (preview != null) showPreview(message, preview);
+                            else toast(message);
+                        });
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        ui.post(() -> {
+                            finishProcessing();
+                            if (isFinishing() || isDestroyed()) return;
+                            toast(message);
+                        });
+                    }
+                }));
+    }
+
+    private void releaseAdjustPreview() {
+        adjustPreviewGen++;
+        ui.removeCallbacks(adjustPreviewDebounce);
+        adjustPreviewDebounce = null;
+        adjustDialog = null;
+        adjustPreviewView = null;
+        adjustChipRow = null;
+        adjustChips.clear();
+        adjustBars = null;
+        adjustUri = null;
+        adjustMime = null;
+        final Bitmap base = adjustPreviewBase;
+        final Bitmap shown = adjustPreviewShown;
+        adjustPreviewBase = null;
+        adjustPreviewShown = null;
+        // 预览任务都在同一个 worker 上，排到最后回收，避免还在读时被回收
+        worker.execute(() -> {
+            if (shown != null && shown != base) shown.recycle();
+            if (base != null) base.recycle();
+        });
     }
 
     private void finishProcessing() {
@@ -2567,7 +3221,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             Uri uri = pendingGalleryUri;
             pendingGalleryUri = null;
             if (hasPerm(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
-                if (uri != null) beginGallery(uri);
+                if (uri != null) openGalleryEditor(uri);
             } else {
                 toast("没有存储权限，无法保存处理结果");
             }
