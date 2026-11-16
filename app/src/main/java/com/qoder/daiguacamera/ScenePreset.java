@@ -121,13 +121,16 @@ public class ScenePreset {
             new ScenePreset("moon", "月亮", "长焦+低 ISO 快速门，别过曝", true, 100, ns(1 / 125.0), -1.0f, 4300, false, CaptureParams.FOCUS_INFINITY, 0f),
             new ScenePreset("stars", "星空", "高 ISO 长曝光，对焦无穷远", true, 3200, ns(2.0), 0f, 4000, false, CaptureParams.FOCUS_INFINITY, 0f),
             new ScenePreset("night", "夜景", "平衡噪点与快门，略欠曝保灯光", true, 800, ns(1 / 15.0), -0.3f, 3900, false, CaptureParams.FOCUS_AUTO, 0f),
+            new ScenePreset("night_portrait", "夜景人像", "拉高 ISO 保快门，人脸不发黑", true, 1600, ns(1 / 30.0), 0.3f, 4300, false, CaptureParams.FOCUS_AUTO, 0f),
             new ScenePreset("fireworks", "烟花", "慢门拖出轨迹，压暗背景", true, 200, ns(0.25), -0.5f, 5000, false, CaptureParams.FOCUS_INFINITY, 0f),
             new ScenePreset("lamp", "灯", "慢门收集光点，低 ISO 保干净", true, 100, ns(0.5), -1.0f, 4000, false, CaptureParams.FOCUS_AUTO, 0f),
+            new ScenePreset("stage", "舞台", "高 ISO 保快门，抓住台上动作", true, 1600, ns(1 / 160.0), -0.3f, 4000, false, CaptureParams.FOCUS_AUTO, 0f),
             // 水面与自然
             new ScenePreset("sea", "大海", "高速快门凝固浪花", true, 100, ns(1 / 500.0), 0f, 6500, false, CaptureParams.FOCUS_INFINITY, 0f),
             new ScenePreset("waterfall", "瀑布", "慢门拉出丝绢水感", true, 100, ns(1 / 8.0), -0.7f, 6000, false, CaptureParams.FOCUS_INFINITY, 0f),
             new ScenePreset("mountain", "远山", "小光圈等效、清晰通透", true, 100, ns(1 / 800.0), 0f, 6800, false, CaptureParams.FOCUS_INFINITY, 0f),
             new ScenePreset("cloud", "云", "保留云层层次，稍加曝光", true, 100, ns(1 / 800.0), 0.3f, 6200, false, CaptureParams.FOCUS_INFINITY, 0f),
+            auto("overcast", "阴天", "平光加半档曝光，白平衡偏冷去灰", 0.5f, 6800),
             new ScenePreset("tyndall", "丁达尔", "压曝光让光束更明显", true, 100, ns(1 / 400.0), -0.7f, 5200, false, CaptureParams.FOCUS_INFINITY, 0f),
             new ScenePreset("fog", "雾", "加曝光保持雾气发白", true, 100, ns(1 / 250.0), 0.7f, 7000, false, CaptureParams.FOCUS_INFINITY, 0f),
             new ScenePreset("rainbow", "彩虹", "稍加对比与曝光，色彩更饱满", true, 100, ns(1 / 320.0), 0.3f, 6000, false, CaptureParams.FOCUS_INFINITY, 0f),
@@ -141,7 +144,10 @@ public class ScenePreset {
             // 人像与静物
             auto("portrait", "人像", "自动曝光+小幅提亮，肤色自然", 0.3f, 5200),
             auto("backlight", "逆光", "大补偿把脸从暗部拉回来", 1.0f, 5600),
+            auto("indoor", "室内", "小幅提亮，压住室内偏黄", 0.3f, 3800),
+            new ScenePreset("pet", "宠物", "高速快门冻结毛发和动作", true, 400, ns(1 / 320.0), 0.3f, 5600, false, CaptureParams.FOCUS_AUTO, 0f),
             new ScenePreset("food", "美食", "微距+暖色，突出质感", true, 200, ns(1 / 125.0), 0.3f, 4600, false, CaptureParams.FOCUS_MACRO, 5f),
             new ScenePreset("flower", "花", "微距+冷调，花瓣更通透", true, 100, ns(1 / 250.0), 0.3f, 5500, false, CaptureParams.FOCUS_MACRO, 7f),
+            new ScenePreset("document", "文档", "微距对焦，拍平文字与表格", true, 100, ns(1 / 200.0), 0f, 5000, false, CaptureParams.FOCUS_MACRO, 4f),
     };
 }
