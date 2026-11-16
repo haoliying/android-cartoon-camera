@@ -45,6 +45,13 @@ public class CartoonRenderer {
         void onError(String message);
     }
 
+    /** 构图分析用的低分辨率帧（ARGB，行序从上到下）。 */
+    public interface AnalysisCallback {
+        void onFrame(int[] argb, int width, int height);
+
+        void onFailed();
+    }
+
     /** 抓取当前预览画面（相机原图拿不到时兜底存图）。 */
     public interface FrameGrabCallback {
         void onFrame(Bitmap frame);
@@ -109,6 +116,12 @@ public class CartoonRenderer {
     private final Runnable frameRunnable = this::renderFrame;
     private volatile FrameGrab pendingGrab;
 
+    // 构图助手：把相机画面缩到小尺寸 FBO 再读回来，避免整屏回读
+    private volatile AnalysisCallback analysisCallback;
+    private volatile boolean analysisPending;
+    private int analysisFbo, analysisTex, analysisW, analysisH;
+    private ByteBuffer analysisBuf;
+
     public void setErrorListener(ErrorListener listener) {
         this.errorListener = listener;
     }
@@ -160,6 +173,33 @@ public class CartoonRenderer {
             return;
         }
         h.post(this::grabFrameNow);
+    }
+
+    /** 请求一帧缩小的相机画面给构图分析使用（在 GL 线程执行）。 */
+    public void requestAnalysisFrame(AnalysisCallback cb) {
+        if (cb == null) return;
+        analysisCallback = cb;
+        analysisPending = true;
+        Handler h = handler;
+        if (h == null) {
+            analysisPending = false;
+            analysisCallback = null;
+            mainHandler.post(cb::onFailed);
+            return;
+        }
+        // 预览持续出帧时下一帧就会处理；相机暂时没有新帧时主动补一帧
+        h.post(() -> {
+            if (cameraTexture == null) {
+                analysisPending = false;
+                analysisCallback = null;
+                mainHandler.post(cb::onFailed);
+                return;
+            }
+            if (!frameScheduled) {
+                frameScheduled = true;
+                h.post(frameRunnable);
+            }
+        });
     }
 
     private void grabFrameNow() {
@@ -615,6 +655,9 @@ public class CartoonRenderer {
         progCopy = null;
         progPlain = null;
         deleteContentTarget();
+        deleteAnalysisTarget();
+        analysisPending = false;
+        analysisCallback = null;
         destroyEglInternal();
     }
 
@@ -638,6 +681,10 @@ public class CartoonRenderer {
         }
         if (encoderSurface != EGL14.EGL_NO_SURFACE && encoderW > 0 && encoderH > 0) {
             blit(encoderSurface, encoderW, encoderH, encoderPlain);
+        }
+        if (analysisPending) {
+            analysisPending = false;
+            renderAnalysisFrame();
         }
     }
 
@@ -784,6 +831,130 @@ public class CartoonRenderer {
         }
 
         EGL14.eglSwapBuffers(eglDisplay, target);
+    }
+
+    // ------------------------------------------------------------------ 构图分析帧
+
+    private void ensureAnalysisTarget(int w, int h) {
+        if (analysisFbo != 0 && analysisW == w && analysisH == h) return;
+        deleteAnalysisTarget();
+        int[] t = new int[1];
+        GLES20.glGenTextures(1, t, 0);
+        analysisTex = t[0];
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, analysisTex);
+        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0,
+                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        int[] f = new int[1];
+        GLES20.glGenFramebuffers(1, f, 0);
+        analysisFbo = f[0];
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, analysisFbo);
+        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                GLES20.GL_TEXTURE_2D, analysisTex, 0);
+        if (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            deleteAnalysisTarget();
+            Log.w(TAG, "analysis fbo incomplete");
+            return;
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        analysisW = w;
+        analysisH = h;
+        analysisBuf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder());
+    }
+
+    private void deleteAnalysisTarget() {
+        if (analysisFbo != 0) {
+            GLES20.glDeleteFramebuffers(1, new int[]{analysisFbo}, 0);
+            analysisFbo = 0;
+        }
+        if (analysisTex != 0) {
+            GLES20.glDeleteTextures(1, new int[]{analysisTex}, 0);
+            analysisTex = 0;
+        }
+        analysisW = 0;
+        analysisH = 0;
+        analysisBuf = null;
+    }
+
+    private void renderAnalysisFrame() {
+        AnalysisCallback cb = analysisCallback;
+        analysisCallback = null;
+        if (cb == null) return;
+        if (progPlain == null || cameraTextureId == 0 || previewW <= 0 || previewH <= 0
+                || fboW <= 0 || fboH <= 0) {
+            mainHandler.post(cb::onFailed);
+            return;
+        }
+        int aw = 200;
+        int ah = Math.round(aw * (float) previewH / previewW);
+        if (ah > 400) {
+            ah = 400;
+            aw = Math.max(140, Math.round(ah * (float) previewW / previewH));
+        }
+        if (ah < 90) ah = 90;
+        try {
+            ensureAnalysisTarget(aw, ah);
+            if (analysisFbo == 0 || analysisBuf == null) {
+                mainHandler.post(cb::onFailed);
+                return;
+            }
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, analysisFbo);
+            GLES20.glViewport(0, 0, aw, ah);
+            Program p = progPlain;
+            GLES20.glUseProgram(p.id);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTextureId);
+            GLES20.glUniform1i(p.u("uVideo"), 0);
+
+            float targetAspect = aw / (float) ah;
+            float sourceAspect = fboW / (float) fboH;
+            float cx = 1f, cy = 1f;
+            if (targetAspect < sourceAspect) {
+                cx = targetAspect / sourceAspect;
+            } else {
+                cy = sourceAspect / targetAspect;
+            }
+            float ez = extraZoom;
+            if (ez > 1.001f) {
+                cx /= ez;
+                cy /= ez;
+            }
+            GLES20.glUniform2f(p.u("uCrop"), cx, cy);
+            GLES20.glUniform1f(p.u("uMirror"), mirror ? 1f : 0f);
+            GLES20.glUniformMatrix4fv(p.u("uTexMatrix"), 1, false, texMatrix, 0);
+            GLES20.glUniform2f(p.u("uTexel"), 1f / fboW, 1f / fboH);
+            GLES20.glUniform1f(p.u("uTime"), animTime);
+            GLES20.glUniform1f(p.u("uNegOn"), 0f);
+            drawQuad(p);
+
+            ByteBuffer buf = analysisBuf;
+            buf.rewind();
+            GLES20.glReadPixels(0, 0, aw, ah, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            int[] out = new int[aw * ah];
+            for (int y = 0; y < ah; y++) {
+                int src = (ah - 1 - y) * aw * 4;
+                int dst = y * aw;
+                for (int x = 0; x < aw; x++) {
+                    int i = src + x * 4;
+                    int r = buf.get(i) & 0xFF;
+                    int g = buf.get(i + 1) & 0xFF;
+                    int b = buf.get(i + 2) & 0xFF;
+                    out[dst + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                }
+            }
+            final int fw = aw;
+            final int fh = ah;
+            mainHandler.post(() -> cb.onFrame(out, fw, fh));
+        } catch (Throwable t) {
+            Log.e(TAG, "analysis frame", t);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            mainHandler.post(cb::onFailed);
+        }
     }
 
     // ------------------------------------------------------------------ sprites

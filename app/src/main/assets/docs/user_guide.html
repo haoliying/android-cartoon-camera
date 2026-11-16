@@ -32,13 +32,13 @@ strong { color: #ffffff; }
 </head>
 <body><main>
 <h1 id="呆瓜相机--操作手册">呆瓜相机 · 操作手册</h1>
-<p>适用版本：<strong>v1.20</strong>（versionCode 21）<br />
+<p>适用版本：<strong>v1.21</strong>（versionCode 22）<br />
 系统要求：Android 7.0 及以上<br />
 包名：<code>com.qoder.daiguacamera</code></p>
 <hr />
 <h2 id="1-安装与首次启动">1. 安装与首次启动</h2>
 <ol>
-<li>安装 <code>daigua-camera-v1.20.apk</code>。如果手机提示“未知来源”，允许当前文件管理器安装即可。</li>
+<li>安装 <code>daigua-camera-v1.21.apk</code>。如果手机提示“未知来源”，允许当前文件管理器安装即可。</li>
 <li>首次打开会申请 <strong>相机</strong> 和 <strong>麦克风</strong> 权限：
 <ul>
 <li>相机：必需，否则无法预览和拍摄。</li>
@@ -49,7 +49,7 @@ strong { color: #ffffff; }
 </ol>
 <hr />
 <h2 id="2-界面一览">2. 界面一览</h2>
-<p><strong>顶部（左右两颗小圆钮，中间留白）</strong></p>
+<p><strong>顶部（左侧闪光灯与构图，右侧说明与小精灵，中间留白）</strong></p>
 <table>
 <thead>
 <tr class="header">
@@ -63,10 +63,14 @@ strong { color: #ffffff; }
 <td>闪光灯：自动 / 常开 / 常闭，点一下循环切换，默认自动</td>
 </tr>
 <tr class="even">
+<td>构图（左）</td>
+<td>构图助手开关，打开后出现网格与构图提示；长按可换网格样式、主体偏好和自动校平</td>
+</tr>
+<tr class="odd">
 <td>说明（右）</td>
 <td>打开内置的操作手册与版本更新说明（离线可看）</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>✦（右）</td>
 <td>小精灵开关（默认关闭）</td>
 </tr>
@@ -339,7 +343,68 @@ strong { color: #ffffff; }
 </ul>
 <p>建议：想要干净的照片就保持关闭；想要“呆瓜”一点的效果再打开。</p>
 <hr />
-<h2 id="8-相册调色">8. 相册调色</h2>
+<h2 id="8-构图助手">8. 构图助手</h2>
+<p>点顶部「构图」开启（按钮变亮），再点关闭。开启后相机每隔约 0.7 秒分析一次当前画面，把建议显示在取景框底部；连续两次给出同一条建议才显示，避免提示乱跳。</p>
+<p><strong>画面上会看到</strong></p>
+<ul>
+<li><strong>网格</strong>：长按「构图」选择三分法 / 中心 / 对角线；三分法四角还有小刻度，方便把主体放在交叉点附近。</li>
+<li><strong>主体框</strong>：琥珀色框住分析到的主体，构图合适时变绿。</li>
+<li><strong>人脸框</strong>：检测到人脸时用细白框标出；如果主体就是人，建议会围绕人脸给。</li>
+<li><strong>地平线</strong>：检测到天空和地面时，用青色线画出地平线，歪了会提示转正。</li>
+<li><strong>提示条</strong>：画面上方一句主建议，下面一行小字说明依据（主体占比、天空占比、倾斜角等）。带「→ / ← / ↑ / ↓」的提示表示画面该往哪边挪。</li>
+</ul>
+<p><strong>会给出的建议</strong></p>
+<table>
+<thead>
+<tr class="header">
+<th>情况</th>
+<th>提示</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>地平线倾斜超过约 2°</td>
+<td>把手机转正（人像模式下不提示）</td>
+</tr>
+<tr class="even">
+<td>背景明显比主体亮</td>
+<td>逆光：点提示条下方的「套用逆光」直接切到「逆光」场景</td>
+</tr>
+<tr class="odd">
+<td>主体太小 / 太满</td>
+<td>靠近一点，或退后一点</td>
+</tr>
+<tr class="even">
+<td>头顶贴边</td>
+<td>上方留一点空间</td>
+</tr>
+<tr class="odd">
+<td>主体偏离三分线</td>
+<td>往左 / 往右挪一点，并给出方向箭头</td>
+</tr>
+<tr class="even">
+<td>背景杂物太多</td>
+<td>换个角度避开杂乱边缘</td>
+</tr>
+<tr class="odd">
+<td>左右对称但没摆正</td>
+<td>往对称中心挪一点</td>
+</tr>
+<tr class="even">
+<td>有引导线并对齐三分线</td>
+<td>提示“引导线用得好”，按快门即可</td>
+</tr>
+</tbody>
+</table>
+<p><strong>设置（长按「构图」）</strong></p>
+<ul>
+<li><strong>网格</strong>：三分法 / 中心 / 对角线。</li>
+<li><strong>主体优先</strong>：自动 / 人像 / 风光。人像会优先用人脸当主体，风光更关注地平线和整体布局。</li>
+<li><strong>自动校平</strong>：开启后，拍照时如果地平线歪了 0.6°–8°，会自动旋转并裁切把画面校平（照片尺寸不变，四角不会露黑边）。</li>
+</ul>
+<p>说明：构图分析全部在本机用轻量图像算法完成，不上传画面；相机暂时不出帧时会跳过本次分析，不影响正常拍摄。</p>
+<hr />
+<h2 id="9-相册调色">9. 相册调色</h2>
 <ol>
 <li>点快门行左侧的「相册」，选择一张图片或一段视频。</li>
 <li>打开调色编辑器：上方是预览，中间是模式标签，下面是参数滑块。</li>
@@ -415,7 +480,7 @@ strong { color: #ffffff; }
 <li>处理视频会调用硬件编解码，机身发热、耗电属于正常现象。</li>
 </ul>
 <hr />
-<h2 id="9-保存位置">9. 保存位置</h2>
+<h2 id="10-保存位置">10. 保存位置</h2>
 <table>
 <thead>
 <tr class="header">
@@ -452,7 +517,7 @@ strong { color: #ffffff; }
 </table>
 <p>保存成功后会提示「已保存到相册 · …」。在系统相册的「相册」或「文件夹」里也能找到 <code>DaiguaCamera</code>。</p>
 <hr />
-<h2 id="10-常见问题">10. 常见问题</h2>
+<h2 id="11-常见问题">11. 常见问题</h2>
 <p><strong>预览黑屏 / 相机打不开</strong><br />
 检查是否授予相机权限；如果其他应用正在占用相机，先关闭它；仍不行时退出重进。</p>
 <p><strong>录像没有声音</strong><br />
@@ -474,9 +539,9 @@ Android 9 及以下需要存储权限；同时确认手机剩余空间充足。<
 <p><strong>想要更干净的画面</strong><br />
 风格选「正常」、关闭小精灵；需要更强效果时再提高卡通风格强度。</p>
 <hr />
-<h2 id="11-版本与反馈">11. 版本与反馈</h2>
+<h2 id="12-版本与反馈">12. 版本与反馈</h2>
 <ul>
-<li>当前版本：v1.20（versionCode 21）</li>
+<li>当前版本：v1.21（versionCode 22）</li>
 <li>内置文档：点顶部「说明」，可离线查看 <strong>操作手册</strong> 和 <strong>更新说明</strong>，内容随 APK 一起安装</li>
 <li>历史更新：<a href="changelog.html">CHANGELOG.md</a></li>
 <li>项目与下载：<a href="https://github.com/haoliying/daigua-camera">https://github.com/haoliying/daigua-camera</a></li>

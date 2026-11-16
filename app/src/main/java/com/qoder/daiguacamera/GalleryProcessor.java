@@ -214,8 +214,18 @@ public class GalleryProcessor {
     public static void processJpegBytes(Context ctx, byte[] jpeg, StylePreset style,
                                         float intensity, boolean sprites, NegativeParams negative,
                                         AtomicBoolean cancel, Listener l) {
+        processJpegBytes(ctx, jpeg, style, intensity, sprites, negative, 0f, cancel, l);
+    }
+
+    /**
+     * 拍照完整参数：negative 为底片外观，levelDeg 为构图助手检测到的地平线倾角，
+     * 非 0 时把成片转正并重新裁切（±8° 内）。
+     */
+    public static void processJpegBytes(Context ctx, byte[] jpeg, StylePreset style,
+                                        float intensity, boolean sprites, NegativeParams negative,
+                                        float levelDeg, AtomicBoolean cancel, Listener l) {
         try {
-            runJpeg(ctx, jpeg, style, intensity, sprites, negative, cancel, l,
+            runJpeg(ctx, jpeg, style, intensity, sprites, negative, levelDeg, cancel, l,
                     MAX_IMAGE_SIDE, MAX_OUTPUT_SIDE, true, negative != null ? "Daigua_NEG_" : "Daigua_");
             return;
         } catch (Cancelled c) {
@@ -226,7 +236,7 @@ public class GalleryProcessor {
         }
         // 兜底：原图数据特殊、显存/内存吃紧或小精灵层出错时，降一档重来（这次不带小精灵）
         try {
-            runJpeg(ctx, jpeg, style, intensity, false, negative, cancel, l,
+            runJpeg(ctx, jpeg, style, intensity, false, negative, levelDeg, cancel, l,
                     MAX_IMAGE_SIDE / 2, MAX_OUTPUT_SIDE / 2, false,
                     negative != null ? "Daigua_NEG_" : "Daigua_");
         } catch (Cancelled c) {
@@ -239,9 +249,9 @@ public class GalleryProcessor {
     }
 
     private static void runJpeg(Context ctx, byte[] jpeg, StylePreset style, float intensity,
-                                boolean sprites, NegativeParams negative, AtomicBoolean cancel,
-                                Listener l, int maxSide, int maxOut, boolean checkBlack,
-                                String prefix) {
+                                boolean sprites, NegativeParams negative, float levelDeg,
+                                AtomicBoolean cancel, Listener l, int maxSide, int maxOut,
+                                boolean checkBlack, String prefix) {
         l.onProgress(0.05f, "读取照片…");
         Bitmap src = decodeJpeg(jpeg, maxSide);
         Bitmap out = null;
@@ -253,6 +263,13 @@ public class GalleryProcessor {
                 Bitmap neg = negative.apply(out);
                 out.recycle();
                 out = neg;
+            }
+            if (Math.abs(levelDeg) >= 0.6f) {
+                Bitmap lev = levelAndCrop(out, levelDeg);
+                if (lev != out) {
+                    out.recycle();
+                    out = lev;
+                }
             }
             if (cancel.get()) throw new Cancelled();
             // 负片本来就是“反过来的画面”，亮场景会接近全黑，不能按黑屏判失败
@@ -282,6 +299,45 @@ public class GalleryProcessor {
             }
         }
         return true;
+    }
+
+    /**
+     * 按地平线倾角把照片转正并裁掉空角：先旋转，再按比例放大到能覆盖原画幅，
+     * 最后居中裁回原尺寸。角度限制在 ±8°，失败时原样返回。
+     */
+    private static Bitmap levelAndCrop(Bitmap src, float deg) {
+        if (src == null) return null;
+        int w = src.getWidth();
+        int h = src.getHeight();
+        if (w < 8 || h < 8) return src;
+        float d = Math.max(-8f, Math.min(8f, deg));
+        double t = Math.toRadians(Math.abs(d));
+        double c = Math.cos(t);
+        double s = Math.sin(t);
+        double limitW = w / (w * c + h * s);
+        double limitH = h / (w * s + h * c);
+        double scale = Math.min(limitW, limitH);
+        if (scale <= 0.72) return src;
+        Bitmap rot = null;
+        Bitmap scaled = null;
+        try {
+            Matrix m = new Matrix();
+            m.postRotate(-d);
+            rot = Bitmap.createBitmap(src, 0, 0, w, h, m, true);
+            Matrix m2 = new Matrix();
+            float k = (float) (1.0 / scale);
+            m2.postScale(k, k, rot.getWidth() * 0.5f, rot.getHeight() * 0.5f);
+            scaled = Bitmap.createBitmap(rot, 0, 0, rot.getWidth(), rot.getHeight(), m2, true);
+            int x = Math.max(0, (scaled.getWidth() - w) / 2);
+            int y = Math.max(0, (scaled.getHeight() - h) / 2);
+            return Bitmap.createBitmap(scaled, x, y, w, h);
+        } catch (Throwable e) {
+            Log.e(TAG, "level and crop", e);
+            return src;
+        } finally {
+            if (rot != null) rot.recycle();
+            if (scaled != null) scaled.recycle();
+        }
     }
 
     // ------------------------------------------------------------------ 图片

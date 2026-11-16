@@ -103,6 +103,12 @@ public class CameraController {
     private volatile int lastIso;
     private volatile long lastExposureNs;
     private volatile int currentSceneMode = CaptureRequest.CONTROL_SCENE_MODE_DISABLED;
+    /** 构图助手开启时打开人脸检测；关掉后不再请求统计信息。 */
+    private volatile boolean faceDetectOn = false;
+    private volatile int faceDetectMode = android.hardware.camera2.CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF;
+    /** 人脸框（显示方向的归一化 x,y,w,h），按面积从大到小。 */
+    private volatile float[] faceRects = new float[0];
+    private volatile int cameraFacing = -1;
     private long lastSceneSwitch;
     private boolean autoSceneSupported = false;
     private boolean sceneNight = false;
@@ -491,6 +497,9 @@ public class CameraController {
         sceneAction = false;
         lastIso = 0;
         lastExposureNs = 0;
+        faceDetectMode = android.hardware.camera2.CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF;
+        faceRects = new float[0];
+        cameraFacing = facing;
         try {
             String id = activeCameraId != null ? activeCameraId : findCameraId(facing);
             if (id == null) return;
@@ -501,6 +510,18 @@ public class CameraController {
             Boolean flash = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
             flashAvailable = flash != null && flash;
             flashKnown = true;
+            int[] fdModes = c.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES);
+            if (fdModes != null) {
+                for (int m : fdModes) {
+                    if (m == android.hardware.camera2.CameraMetadata.STATISTICS_FACE_DETECT_MODE_FULL) {
+                        faceDetectMode = m;
+                        break;
+                    }
+                    if (m == android.hardware.camera2.CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE) {
+                        faceDetectMode = m;
+                    }
+                }
+            }
             // 传统数码变焦上限，任何设备都有
             float sm = 1f;
             Float mz = c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);
@@ -863,6 +884,9 @@ public class CameraController {
                         if (exp != null) lastExposureNs = exp;
                     } catch (Throwable ignored) {
                     }
+                    if (faceDetectOn) {
+                        updateFaces(result);
+                    }
                     if (!params.autoScene) return;
                     long now = SystemClock.elapsedRealtime();
                     if (now - lastSceneSwitch < 1200) return;
@@ -873,6 +897,87 @@ public class CameraController {
                     }
                 }
             };
+
+    /** 构图助手开关：打开后相机才会输出人脸统计信息。 */
+    public void setFaceDetectEnabled(boolean on) {
+        if (faceDetectOn == on) return;
+        faceDetectOn = on;
+        if (!on) faceRects = new float[0];
+        handler.post(this::applyRepeating);
+    }
+
+    /** 最新人脸框（显示方向归一化 x,y,w,h），按面积从大到小。 */
+    public float[] faceRectsDisplay() {
+        return faceRects;
+    }
+
+    private void updateFaces(TotalCaptureResult result) {
+        try {
+            android.hardware.camera2.params.Face[] fs =
+                    result.get(CaptureResult.STATISTICS_FACES);
+            if (fs == null || fs.length == 0) {
+                faceRects = new float[0];
+                return;
+            }
+            java.util.ArrayList<float[]> list = new java.util.ArrayList<>();
+            android.graphics.Rect crop = currentCropRect();
+            float extra = extraZoom();
+            if (extra > 1.001f) {
+                int ew = Math.max(1, Math.round(crop.width() / extra));
+                int eh = Math.max(1, Math.round(crop.height() / extra));
+                int el = crop.left + (crop.width() - ew) / 2;
+                int et = crop.top + (crop.height() - eh) / 2;
+                crop = new android.graphics.Rect(el, et, el + ew, et + eh);
+            }
+            int rot = ((stillRotation % 360) + 360) % 360;
+            boolean front = cameraFacing == android.hardware.camera2.CameraCharacteristics
+                    .LENS_FACING_FRONT;
+            for (android.hardware.camera2.params.Face f : fs) {
+                android.graphics.Rect r = f.getBounds();
+                if (r == null || r.width() <= 0 || r.height() <= 0) continue;
+                float[] xs = {(r.left - crop.left) / (float) crop.width(),
+                        (r.right - crop.left) / (float) crop.width()};
+                float[] ys = {(r.top - crop.top) / (float) crop.height(),
+                        (r.bottom - crop.top) / (float) crop.height()};
+                float minX = 1f, minY = 1f, maxX = 0f, maxY = 0f;
+                for (float sx : xs) {
+                    for (float sy : ys) {
+                        float nx;
+                        float ny;
+                        if (rot == 90) {
+                            nx = 1f - sy;
+                            ny = sx;
+                        } else if (rot == 270) {
+                            nx = sy;
+                            ny = 1f - sx;
+                        } else if (rot == 180) {
+                            nx = 1f - sx;
+                            ny = 1f - sy;
+                        } else {
+                            nx = sx;
+                            ny = sy;
+                        }
+                        if (front) nx = 1f - nx;
+                        if (nx < minX) minX = nx;
+                        if (nx > maxX) maxX = nx;
+                        if (ny < minY) minY = ny;
+                        if (ny > maxY) maxY = ny;
+                    }
+                }
+                if (maxX <= minX || maxY <= minY) continue;
+                list.add(new float[]{Math.max(0f, minX), Math.max(0f, minY),
+                        Math.min(1f, maxX) - Math.max(0f, minX),
+                        Math.min(1f, maxY) - Math.max(0f, minY)});
+            }
+            list.sort((a, b) -> Float.compare(b[2] * b[3], a[2] * a[3]));
+            float[] out = new float[list.size() * 4];
+            for (int i = 0; i < list.size(); i++) {
+                System.arraycopy(list.get(i), 0, out, i * 4, 4);
+            }
+            faceRects = out;
+        } catch (Throwable ignored) {
+        }
+    }
 
     /** 暗光优先夜景，明显晃动优先运动，其余交给普通自动。 */
     private int pickSceneMode() {
@@ -972,6 +1077,13 @@ public class CameraController {
                 } catch (Throwable ignored) {
                 }
             }
+        }
+        // 人脸检测：只在预览/录像的重复请求里打开，构图助手关闭时省电
+        try {
+            int fmode = faceDetectOn && !forStill
+                    ? faceDetectMode : android.hardware.camera2.CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF;
+            b.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, fmode);
+        } catch (Throwable ignored) {
         }
         applyFlashAndZoom(b, forStill);
     }

@@ -173,6 +173,24 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private boolean tapMoved;
     private View focusRing;
 
+    // 构图助手
+    private CompositionOverlay compOverlay;
+    private TextView compBtn;
+    private TextView compActionChip;
+    private boolean compositionOn;
+    private int compGrid = CompositionAdvisor.GRID_THIRDS;
+    private int compSubjectPref = CompositionAdvisor.SUBJECT_AUTO;
+    private boolean compAutoLevel;
+    private ExecutorService compExec;
+    private final AtomicBoolean compBusy = new AtomicBoolean(false);
+    private volatile CompositionAdvisor.Result lastComp;
+    private int compGeneration;
+    private String compShownKey;
+    private int compHintCount;
+    private float focusViewU = -1f, focusViewV = -1f;
+    private long focusViewAt;
+    private float captureLevelDeg;
+
     /** 是否在非正常风格下额外保存一份未加风格的原素材。 */
     private boolean saveOriginal;
     /** 本次录像是否把原始画面写进编码器（开启保存原素材且非正常风格）。 */
@@ -267,12 +285,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         videoScene = sceneStore.find(prefs.getString("video_scene", null));
         negativeParams = NegativeParams.load(prefs);
         adjustStore = new AdjustStore(this);
+        compositionOn = prefs.getBoolean("comp_on", false);
+        compGrid = prefs.getInt("comp_grid", CompositionAdvisor.GRID_THIRDS);
+        compSubjectPref = prefs.getInt("comp_subj", CompositionAdvisor.SUBJECT_AUTO);
+        compAutoLevel = prefs.getBoolean("comp_level", false);
+        compExec = Executors.newSingleThreadExecutor();
 
         renderer = new CartoonRenderer();
         renderer.setErrorListener(msg -> ui.post(() -> toast(msg)));
         renderer.setStyle(style, intensity);
         renderer.setSpritesEnabled(spritesOn);
         cameraController = new CameraController(this);
+        cameraController.setFaceDetectEnabled(compositionOn);
 
         buildUi();
         updateModeUi();
@@ -290,12 +314,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         super.onResume();
         maybeStartCamera();
         registerMotion();
+        if (compositionOn) startCompositionLoop();
     }
 
     @Override
     protected void onPause() {
         super.onPause();
         unregisterMotion();
+        stopCompositionLoop();
         if (recording || recorderStarted) {
             stopRecording();
         }
@@ -307,6 +333,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (processingCancel != null) processingCancel.set(true);
         capturing = false;
         worker.shutdownNow();
+        if (compExec != null) compExec.shutdownNow();
         dismissProgress();
         ui.removeCallbacksAndMessages(null);
         if (cameraController != null) cameraController.shutdown();
@@ -331,6 +358,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         scrimLp.gravity = Gravity.TOP;
         root.addView(topScrim, scrimLp);
 
+        compOverlay = new CompositionOverlay(this);
+        compOverlay.setActive(compositionOn);
+        compOverlay.setGridMode(compGrid);
+        root.addView(compOverlay, new FrameLayout.LayoutParams(MATCH, MATCH));
+
         topBar = new LinearLayout(this);
         topBar.setOrientation(LinearLayout.HORIZONTAL);
         topBar.setGravity(Gravity.CENTER_VERTICAL);
@@ -351,6 +383,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         LinearLayout.LayoutParams flashLp = new LinearLayout.LayoutParams(dp(40), dp(40));
         topBar.addView(flashBtn, flashLp);
 
+        compBtn = circleButton("构图", 9.5f, 40);
+        compBtn.setAlpha(compositionOn ? 1f : 0.42f);
+        compBtn.setContentDescription("构图助手：点击开关，长按设置");
+        compBtn.setOnClickListener(v -> setCompositionOn(!compositionOn));
+        compBtn.setOnLongClickListener(v -> {
+            showCompositionSettings();
+            return true;
+        });
+        LinearLayout.LayoutParams compLp = new LinearLayout.LayoutParams(dp(40), dp(40));
+        compLp.leftMargin = dp(6);
+        topBar.addView(compBtn, compLp);
+
         View topSpacer = new View(this);
         topBar.addView(topSpacer, new LinearLayout.LayoutParams(0, dp(1), 1f));
 
@@ -370,6 +414,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         FrameLayout.LayoutParams topLp = new FrameLayout.LayoutParams(MATCH, WRAP);
         topLp.gravity = Gravity.TOP;
         root.addView(topBar, topLp);
+
+        compActionChip = new TextView(this);
+        compActionChip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        compActionChip.setTextColor(0xFFFFFFFF);
+        compActionChip.setTypeface(Typeface.DEFAULT_BOLD);
+        compActionChip.setGravity(Gravity.CENTER);
+        GradientDrawable chipBg = new GradientDrawable();
+        chipBg.setCornerRadius(dp(20));
+        chipBg.setColor(0xE6FF7A1A);
+        compActionChip.setBackground(chipBg);
+        compActionChip.setPadding(dp(18), dp(9), dp(18), dp(9));
+        compActionChip.setVisibility(View.GONE);
+        FrameLayout.LayoutParams actChipLp = new FrameLayout.LayoutParams(WRAP, WRAP);
+        actChipLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        actChipLp.bottomMargin = dp(166);
+        root.addView(compActionChip, actChipLp);
 
         // 录制指示
         recBadge = new LinearLayout(this);
@@ -623,6 +683,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(MATCH, WRAP);
         panelLp.gravity = Gravity.BOTTOM;
         root.addView(bottomPanel, panelLp);
+        bottomPanel.addOnLayoutChangeListener((v, l, t, rt, b, ol, ot, ort, ob)
+                -> updateCompInsets());
+        updateCompInsets();
 
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             int top = insets.getSystemWindowInsetTop();
@@ -637,6 +700,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 zlp.topMargin = top + dp(64);
                 zoomBox.setLayoutParams(zlp);
             }
+            ui.post(MainActivity.this::updateCompInsets);
             return insets;
         });
 
@@ -721,6 +785,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                         }
                         if (cameraController.focusAt(fx, fy, mirror)) {
                             showFocusRing(e.getX(), e.getY());
+                            // 记下视图坐标，构图助手把它当成“用户关心的主体”
+                            focusViewU = e.getX() / w;
+                            focusViewV = e.getY() / h;
+                            focusViewAt = SystemClock.elapsedRealtime();
                         }
                     }
                     break;
@@ -763,6 +831,291 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             spriteBtn.animate().alpha(spritesOn ? 1f : 0.38f).setDuration(150).start();
         }
         toast(spritesOn ? "小精灵：开（相机/拍照/相册都会出现）" : "小精灵：关");
+    }
+
+    // ------------------------------------------------------------------ 构图助手
+
+    /** 让提示条和“套用场景”按钮始终排在底部面板上方。 */
+    private void updateCompInsets() {
+        if (bottomPanel == null) return;
+        int ph = bottomPanel.getHeight();
+        if (ph <= 0) ph = dp(200);
+        if (compOverlay != null) compOverlay.setBottomInset(ph + dp(10));
+        if (compActionChip != null) {
+            FrameLayout.LayoutParams lp =
+                    (FrameLayout.LayoutParams) compActionChip.getLayoutParams();
+            int want = ph + dp(80);
+            if (lp.bottomMargin != want) {
+                lp.bottomMargin = want;
+                compActionChip.setLayoutParams(lp);
+            }
+        }
+    }
+
+    private void setCompositionOn(boolean on) {
+        compositionOn = on;
+        prefs.edit().putBoolean("comp_on", on).apply();
+        if (compBtn != null) {
+            compBtn.animate().alpha(on ? 1f : 0.42f).setDuration(150).start();
+        }
+        if (compOverlay != null) {
+            compOverlay.setActive(on);
+            compOverlay.clearResult();
+        }
+        if (compActionChip != null) compActionChip.setVisibility(View.GONE);
+        if (cameraController != null) cameraController.setFaceDetectEnabled(on);
+        lastComp = null;
+        compShownKey = null;
+        compHintCount = 0;
+        if (on) {
+            startCompositionLoop();
+            toast("构图助手已开启 · 长按「构图」可换网格 / 自动校平");
+        } else {
+            stopCompositionLoop();
+        }
+    }
+
+    private void startCompositionLoop() {
+        ui.removeCallbacks(compLoop);
+        if (compositionOn) ui.postDelayed(compLoop, 500);
+    }
+
+    private void stopCompositionLoop() {
+        ui.removeCallbacks(compLoop);
+    }
+
+    private final Runnable compLoop = new Runnable() {
+        @Override
+        public void run() {
+            if (!compositionOn) return;
+            boolean ready = surfaceReady && cameraOpened && renderer != null
+                    && !capturing && !processing && !recording && !recorderStarted;
+            if (ready) requestCompositionFrame();
+            ui.postDelayed(this, 700);
+        }
+    };
+
+    private void requestCompositionFrame() {
+        final CartoonRenderer r = renderer;
+        if (r == null) return;
+        if (!compBusy.compareAndSet(false, true)) return;
+        final int gen = ++compGeneration;
+        // 超时保护：相机暂时不出帧时不至于一直卡住
+        ui.postDelayed(() -> {
+            if (compGeneration == gen) compBusy.set(false);
+        }, 1500);
+
+        float fu = -1f, fv = -1f;
+        if (focusViewU >= 0f && SystemClock.elapsedRealtime() - focusViewAt < 12000) {
+            fu = focusViewU;
+            fv = focusViewV;
+        }
+        final float ffU = fu;
+        final float ffV = fv;
+        final float[][] faces = facesInView();
+        final int pref = compSubjectPref;
+        r.requestAnalysisFrame(new CartoonRenderer.AnalysisCallback() {
+            @Override
+            public void onFrame(int[] argb, int w, int h) {
+                if (!compositionOn || compGeneration != gen) {
+                    if (compGeneration == gen) compBusy.set(false);
+                    return;
+                }
+                ExecutorService ex = compExec;
+                if (ex == null || ex.isShutdown()) {
+                    compBusy.set(false);
+                    return;
+                }
+                ex.execute(() -> {
+                    CompositionAdvisor.Result res;
+                    try {
+                        res = CompositionAdvisor.analyze(argb, w, h, ffU, ffV, faces, pref);
+                    } catch (Throwable t) {
+                        res = null;
+                    }
+                    final CompositionAdvisor.Result rr = res;
+                    ui.post(() -> {
+                        if (compGeneration != gen) return;
+                        compBusy.set(false);
+                        applyCompositionResult(rr);
+                    });
+                });
+            }
+
+            @Override
+            public void onFailed() {
+                if (compGeneration == gen) compBusy.set(false);
+            }
+        });
+    }
+
+    /** 人脸框从“完整画面”换算到预览可见区域（预览是居中裁切填满屏幕的）。 */
+    private float[][] facesInView() {
+        if (cameraController == null || !compositionOn) return new float[0][];
+        float[] flat = cameraController.faceRectsDisplay();
+        if (flat == null || flat.length < 4) return new float[0][];
+        int vw = surfaceView == null ? 0 : surfaceView.getWidth();
+        int vh = surfaceView == null ? 0 : surfaceView.getHeight();
+        if (vw <= 0 || vh <= 0 || orientedW <= 0 || orientedH <= 0) return new float[0][];
+        float viewAspect = vw / (float) vh;
+        float imgAspect = orientedW / (float) orientedH;
+        float cx = 1f, cy = 1f;
+        if (viewAspect < imgAspect) cx = viewAspect / imgAspect;
+        else if (imgAspect < viewAspect) cy = imgAspect / viewAspect;
+        int n = flat.length / 4;
+        float[][] out = new float[n][];
+        for (int i = 0; i < n; i++) {
+            float x = 0.5f + (flat[i * 4] - 0.5f) / cx;
+            float y = 0.5f + (flat[i * 4 + 1] - 0.5f) / cy;
+            float ww = flat[i * 4 + 2] / cx;
+            float hh = flat[i * 4 + 3] / cy;
+            float l = Math.max(0f, x);
+            float t = Math.max(0f, y);
+            float rr = Math.min(1f, x + ww);
+            float bb = Math.min(1f, y + hh);
+            if (rr <= l || bb <= t) continue;
+            out[i] = new float[]{l, t, rr - l, bb - t};
+        }
+        return out;
+    }
+
+    private void applyCompositionResult(CompositionAdvisor.Result r) {
+        if (!compositionOn || compOverlay == null || r == null) return;
+        lastComp = r;
+        boolean ready = false;
+        if (r.hint != null) {
+            String key = r.severity + "|" + r.hint;
+            if (key.equals(compShownKey)) {
+                if (compHintCount < 6) compHintCount++;
+            } else {
+                compShownKey = key;
+                compHintCount = 1;
+            }
+            // 连续两次分析都给出同一条建议才显示，避免画面轻微晃动时提示乱跳
+            ready = compHintCount >= 2;
+        } else {
+            compShownKey = null;
+            compHintCount = 0;
+        }
+        compOverlay.setResult(r, ready);
+        if (ready && r.action != null && compActionChip != null) {
+            compActionChip.setText(r.actionLabel == null ? "套用" : r.actionLabel);
+            compActionChip.setVisibility(View.VISIBLE);
+            compActionChip.setOnClickListener(v -> applyCompAction(r.action));
+        } else if (compActionChip != null) {
+            compActionChip.setVisibility(View.GONE);
+        }
+    }
+
+    private void applyCompAction(String action) {
+        if ("scene:backlight".equals(action)) {
+            if (captureMode != MODE_PHOTO) {
+                toast("切到拍照后可以使用「逆光」场景");
+                return;
+            }
+            ScenePreset sp = sceneStore.find("backlight");
+            if (sp == null) return;
+            setCurScene(sp);
+            applyCameraParams();
+            updateExtraUi();
+            toast("已切到「逆光」场景");
+            if (compActionChip != null) compActionChip.setVisibility(View.GONE);
+        }
+    }
+
+    private void showCompositionSettings() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(18), dp(8), dp(18), dp(4));
+
+        String[] gridNames = {"三分法", "中心", "对角线"};
+        root.addView(sectionLabel("网格"));
+        LinearLayout gridRow = new LinearLayout(this);
+        gridRow.setOrientation(LinearLayout.HORIZONTAL);
+        final TextView[] gridPills = new TextView[3];
+        for (int i = 0; i < gridNames.length; i++) {
+            final int idx = i;
+            TextView b = pill(gridNames[i], compGrid == i);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+            b.setOnClickListener(v -> {
+                compGrid = idx;
+                prefs.edit().putInt("comp_grid", idx).apply();
+                if (compOverlay != null) compOverlay.setGridMode(idx);
+                for (int k = 0; k < gridPills.length; k++) {
+                    stylePill(gridPills[k], k == idx);
+                }
+            });
+            gridPills[i] = b;
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, WRAP, 1f);
+            lp.rightMargin = i < gridNames.length - 1 ? dp(6) : 0;
+            gridRow.addView(b, lp);
+        }
+        root.addView(gridRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        String[] subjNames = {"自动", "人像", "风光"};
+        root.addView(sectionLabel("主体优先"));
+        LinearLayout subjRow = new LinearLayout(this);
+        subjRow.setOrientation(LinearLayout.HORIZONTAL);
+        final TextView[] subjPills = new TextView[3];
+        for (int i = 0; i < subjNames.length; i++) {
+            final int idx = i;
+            TextView b = pill(subjNames[i], compSubjectPref == i);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+            b.setOnClickListener(v -> {
+                compSubjectPref = idx;
+                prefs.edit().putInt("comp_subj", idx).apply();
+                for (int k = 0; k < subjPills.length; k++) {
+                    stylePill(subjPills[k], k == idx);
+                }
+            });
+            subjPills[i] = b;
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, WRAP, 1f);
+            lp.rightMargin = i < subjNames.length - 1 ? dp(6) : 0;
+            subjRow.addView(b, lp);
+        }
+        root.addView(subjRow, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        Switch levelSw = new Switch(this);
+        levelSw.setText("拍照后自动校平（按地平线，±8°）");
+        levelSw.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        levelSw.setTextColor(0xFFE9EAF2);
+        levelSw.setChecked(compAutoLevel);
+        levelSw.setOnCheckedChangeListener((btn, checked) -> {
+            compAutoLevel = checked;
+            prefs.edit().putBoolean("comp_level", checked).apply();
+        });
+        LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(MATCH, WRAP);
+        swLp.topMargin = dp(10);
+        root.addView(levelSw, swLp);
+
+        TextView tip = new TextView(this);
+        tip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        tip.setTextColor(0xFF9AA0B2);
+        tip.setLineSpacing(dp(3), 1f);
+        tip.setText("主体优先看人脸，没有脸时以你点过的对焦点为主。\n"
+                + "提示约每 0.7 秒刷新：三分位置、主体大小、头顶空间、地平线、逆光、背景杂乱、对称与引导线。\n"
+                + "自动校平只作用于照片（同时保存的原素材不转），会轻微裁掉四周边缘。");
+        LinearLayout.LayoutParams tipLp = new LinearLayout.LayoutParams(MATCH, WRAP);
+        tipLp.topMargin = dp(10);
+        root.addView(tip, tipLp);
+
+        new AlertDialog.Builder(this)
+                .setTitle("构图助手")
+                .setView(root)
+                .setPositiveButton("完成", null)
+                .show();
+    }
+
+    private TextView sectionLabel(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        t.setTextColor(0xFF9AA0B2);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        lp.topMargin = dp(12);
+        lp.bottomMargin = dp(6);
+        t.setLayoutParams(lp);
+        return t;
     }
 
     // ------------------------------------------------------------------ 闪光灯 / 变焦
@@ -1290,6 +1643,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         recordInner.animate().scaleX(0.8f).scaleY(0.8f).setDuration(90)
                 .withEndAction(() -> recordInner.animate().scaleX(1f).scaleY(1f)
                         .setDuration(120).start()).start();
+        captureLevelDeg = 0f;
+        if (compositionOn && compAutoLevel && facing == CameraCharacteristics.LENS_FACING_BACK) {
+            CompositionAdvisor.Result lc = lastComp;
+            if (lc != null && lc.horizonConf > 0.5f
+                    && Math.abs(lc.horizonTilt) >= 0.6f && Math.abs(lc.horizonTilt) <= 8f) {
+                captureLevelDeg = lc.horizonTilt;
+            }
+        }
         cameraController.captureStill(bytes -> ui.post(() -> startPhotoProcess(bytes)),
                 msg -> ui.post(() -> {
                     capturing = false;
@@ -1313,6 +1674,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         final float extra = cameraController != null ? cameraController.extraZoom() : 1f;
         // 非正常风格且开启了“保存原素材”：先把相机原始 JPEG 原样存一份
         final boolean saveRaw = !negMode && saveOriginal && !st.normal;
+        final float level = captureLevelDeg;
         final AtomicBoolean cancel = new AtomicBoolean(false);
         processing = true;
         processingCancel = cancel;
@@ -1344,7 +1706,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     Log.e(TAG, "save original jpeg", t);
                 }
             }
-            GalleryProcessor.processJpegBytes(this, shot, st, in, spr, neg, cancel,
+            GalleryProcessor.processJpegBytes(this, shot, st, in, spr, neg, level, cancel,
                 new GalleryProcessor.Listener() {
                     @Override
                     public void onProgress(float p, String label) {
@@ -3466,6 +3828,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             return;
         }
         micAllowed = hasPerm(Manifest.permission.RECORD_AUDIO);
+        // 录制时先收起构图提示，网格保留
+        if (compOverlay != null) compOverlay.clearResult();
 
         int recW = 720, recH = 1280;
         if (orientedW > orientedH) {
