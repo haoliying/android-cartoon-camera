@@ -148,6 +148,8 @@ public class ScenePreset {
             new ScenePreset("pet", "宠物", "高速快门冻结毛发和动作", true, 400, ns(1 / 320.0), 0.3f, 5600, false, CaptureParams.FOCUS_AUTO, 0f),
             new ScenePreset("food", "美食", "微距+暖色，突出质感", true, 200, ns(1 / 125.0), 0.3f, 4600, false, CaptureParams.FOCUS_MACRO, 5f),
             new ScenePreset("flower", "花", "微距+冷调，花瓣更通透", true, 100, ns(1 / 250.0), 0.3f, 5500, false, CaptureParams.FOCUS_MACRO, 7f),
+            new ScenePreset("leaves", "树叶", "近摄微距，逆光拍出叶脉通透", true, 100, ns(1 / 200.0), 0.3f, 5600, false, CaptureParams.FOCUS_MACRO, 5f),
+            new ScenePreset("tree", "树", "低 ISO 收住树冠细节，绿色不发黄", true, 100, ns(1 / 320.0), 0.3f, 5800, false, CaptureParams.FOCUS_INFINITY, 0f),
             new ScenePreset("document", "文档", "微距对焦，拍平文字与表格", true, 100, ns(1 / 200.0), 0f, 5000, false, CaptureParams.FOCUS_MACRO, 4f),
     };
 }
