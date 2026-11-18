@@ -182,6 +182,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private int compSubjectPref = CompositionAdvisor.SUBJECT_AUTO;
     private boolean compAutoLevel;
     private ExecutorService compExec;
+    // 取景画面在屏幕上的实际区域（像素）：四周留黑边，不裁切画面
+    private int previewL, previewT, previewR, previewB;
+    private View topScrim;
     private final AtomicBoolean compBusy = new AtomicBoolean(false);
     private volatile CompositionAdvisor.Result lastComp;
     private int compGeneration;
@@ -350,7 +353,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         root.addView(surfaceView, new FrameLayout.LayoutParams(MATCH, MATCH));
         surfaceView.getHolder().addCallback(this);
 
-        View topScrim = new View(this);
+        topScrim = new View(this);
         GradientDrawable scrimBg = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                 new int[]{0xCC000000, 0x00000000});
         topScrim.setBackground(scrimBg);
@@ -684,8 +687,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         panelLp.gravity = Gravity.BOTTOM;
         root.addView(bottomPanel, panelLp);
         bottomPanel.addOnLayoutChangeListener((v, l, t, rt, b, ol, ot, ort, ob)
-                -> updateCompInsets());
-        updateCompInsets();
+                -> updatePreviewContentRect());
+        topBar.addOnLayoutChangeListener((v, l, t, rt, b, ol, ot, ort, ob)
+                -> updatePreviewContentRect());
+        surfaceView.addOnLayoutChangeListener((v, l, t, rt, b, ol, ot, ort, ob)
+                -> updatePreviewContentRect());
+        updatePreviewContentRect();
 
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             int top = insets.getSystemWindowInsetTop();
@@ -700,7 +707,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 zlp.topMargin = top + dp(64);
                 zoomBox.setLayoutParams(zlp);
             }
-            ui.post(MainActivity.this::updateCompInsets);
+            ui.post(MainActivity.this::updatePreviewContentRect);
             return insets;
         });
 
@@ -745,8 +752,21 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             float w = v.getWidth();
             float h = v.getHeight();
             if (w <= 0 || h <= 0) return false;
-            float u = e.getX() / w;
-            float vv = 1f - e.getY() / h;
+            // 取景画面只占屏幕中间一块，触摸坐标先映射到这块画面
+            boolean inPreview = previewR > previewL && previewB > previewT
+                    && e.getX() >= previewL && e.getX() <= previewR
+                    && e.getY() >= previewT && e.getY() <= previewB;
+            float u;
+            float vv;
+            if (inPreview) {
+                u = (e.getX() - previewL) / (float) (previewR - previewL);
+                vv = 1f - (e.getY() - previewT) / (float) (previewB - previewT);
+            } else {
+                u = e.getX() / w;
+                vv = 1f - e.getY() / h;
+            }
+            u = Math.max(0f, Math.min(1f, u));
+            vv = Math.max(0f, Math.min(1f, vv));
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     lastTouchPost = SystemClock.elapsedRealtime();
@@ -767,27 +787,15 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     break;
                 case MotionEvent.ACTION_UP:
                     renderer.onTouch(u, vv, 2);
-                    // 轻点预览：设置对焦点（拖动、捏合都不算）
-                    if (!tapMoved && !pinching && cameraController != null) {
-                        float fx = e.getX() / w;
-                        float fy = e.getY() / h;
-                        // 预览按比例居中裁切填满屏幕，先把屏幕坐标还原到完整画面
-                        if (orientedW > 0 && orientedH > 0) {
-                            float viewAspect = w / (float) h;
-                            float imgAspect = orientedW / (float) orientedH;
-                            if (viewAspect < imgAspect) {
-                                float cx = viewAspect / imgAspect;
-                                fx = 0.5f + (fx - 0.5f) * cx;
-                            } else if (imgAspect < viewAspect) {
-                                float cy = imgAspect / viewAspect;
-                                fy = 0.5f + (fy - 0.5f) * cy;
-                            }
-                        }
+                    // 轻点预览：设置对焦点（拖动、捏合都不算；点在黑边上不处理）
+                    if (!tapMoved && !pinching && inPreview && cameraController != null) {
+                        float fx = (e.getX() - previewL) / (float) (previewR - previewL);
+                        float fy = (e.getY() - previewT) / (float) (previewB - previewT);
                         if (cameraController.focusAt(fx, fy, mirror)) {
                             showFocusRing(e.getX(), e.getY());
-                            // 记下视图坐标，构图助手把它当成“用户关心的主体”
-                            focusViewU = e.getX() / w;
-                            focusViewV = e.getY() / h;
+                            // 记下画面内坐标，构图助手把它当成“用户关心的主体”
+                            focusViewU = fx;
+                            focusViewV = fy;
                             focusViewAt = SystemClock.elapsedRealtime();
                         }
                     }
@@ -835,16 +843,71 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     // ------------------------------------------------------------------ 构图助手
 
-    /** 让提示条和“套用场景”按钮始终排在底部面板上方。 */
-    private void updateCompInsets() {
-        if (bottomPanel == null) return;
-        int ph = bottomPanel.getHeight();
-        if (ph <= 0) ph = dp(200);
-        if (compOverlay != null) compOverlay.setBottomInset(ph + dp(10));
+    /**
+     * 取景画面不再铺满屏幕：在顶部栏和底部面板之间按相机画幅居中显示，
+     * 画面完整可见、不裁切，四周留黑边。叠加层和触摸都用同一块区域。
+     */
+    /**
+     * 取景框（以及录像）使用的画幅，宽/高已按当前显示方向。
+     * 以实际拍照尺寸为准，取景框看到的范围和照片一致。非 4:3 的机型会让预览轻微裁边。
+     */
+    private float previewImageAspect() {
+        boolean portrait = orientedH >= orientedW;
+        float aspect = orientedW > 0 && orientedH > 0
+                ? orientedW / (float) orientedH : 3f / 4f;
+        Size shot = cameraController != null ? cameraController.stillSize() : null;
+        if (shot != null && shot.getWidth() > 0 && shot.getHeight() > 0) {
+            int lo = Math.min(shot.getWidth(), shot.getHeight());
+            int hi = Math.max(shot.getWidth(), shot.getHeight());
+            aspect = portrait ? lo / (float) hi : hi / (float) lo;
+        }
+        return aspect;
+    }
+
+    private void updatePreviewContentRect() {
+        if (surfaceView == null || topBar == null || bottomPanel == null) return;
+        int w = surfaceView.getWidth();
+        int h = surfaceView.getHeight();
+        if (w <= 0 || h <= 0) return;
+        int top = Math.max(0, topBar.getBottom() + dp(4));
+        int panelTop = bottomPanel.getTop();
+        int bottom = panelTop > top ? panelTop - dp(4) : h - dp(4);
+        int availH = Math.max(dp(96), bottom - top);
+        float imgAspect = previewImageAspect();
+        int cw = w;
+        int ch = Math.round(w / imgAspect);
+        if (ch > availH) {
+            ch = availH;
+            cw = Math.round(ch * imgAspect);
+        }
+        if (cw > w) {
+            cw = w;
+            ch = Math.round(cw / imgAspect);
+        }
+        int left = Math.max(0, (w - cw) / 2);
+        int ctop = Math.max(0, top + (availH - ch) / 2);
+        previewL = left;
+        previewT = ctop;
+        previewR = left + cw;
+        previewB = ctop + ch;
+        if (renderer != null) {
+            renderer.setContentRect(previewL, previewT, previewR, previewB);
+        }
+        if (compOverlay != null) {
+            compOverlay.setContentRect(previewL, previewT, previewR, previewB);
+        }
+        if (topScrim != null) {
+            // 顶部渐变只压住工具栏，别盖到取景画面上
+            ViewGroup.LayoutParams lp = topScrim.getLayoutParams();
+            if (lp != null && lp.height != previewT) {
+                lp.height = Math.max(dp(48), previewT);
+                topScrim.setLayoutParams(lp);
+            }
+        }
         if (compActionChip != null) {
             FrameLayout.LayoutParams lp =
                     (FrameLayout.LayoutParams) compActionChip.getLayoutParams();
-            int want = ph + dp(80);
+            int want = bottomPanel.getHeight() + dp(80);
             if (lp.bottomMargin != want) {
                 lp.bottomMargin = want;
                 compActionChip.setLayoutParams(lp);
@@ -949,30 +1012,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         });
     }
 
-    /** 人脸框从“完整画面”换算到预览可见区域（预览是居中裁切填满屏幕的）。 */
+    /** 人脸框坐标与完整相机画面一致，取景框只做等比适配，无需再换算。 */
     private float[][] facesInView() {
         if (cameraController == null || !compositionOn) return new float[0][];
         float[] flat = cameraController.faceRectsDisplay();
         if (flat == null || flat.length < 4) return new float[0][];
-        int vw = surfaceView == null ? 0 : surfaceView.getWidth();
-        int vh = surfaceView == null ? 0 : surfaceView.getHeight();
-        if (vw <= 0 || vh <= 0 || orientedW <= 0 || orientedH <= 0) return new float[0][];
-        float viewAspect = vw / (float) vh;
-        float imgAspect = orientedW / (float) orientedH;
-        float cx = 1f, cy = 1f;
-        if (viewAspect < imgAspect) cx = viewAspect / imgAspect;
-        else if (imgAspect < viewAspect) cy = imgAspect / viewAspect;
         int n = flat.length / 4;
         float[][] out = new float[n][];
         for (int i = 0; i < n; i++) {
-            float x = 0.5f + (flat[i * 4] - 0.5f) / cx;
-            float y = 0.5f + (flat[i * 4 + 1] - 0.5f) / cy;
-            float ww = flat[i * 4 + 2] / cx;
-            float hh = flat[i * 4 + 3] / cy;
-            float l = Math.max(0f, x);
-            float t = Math.max(0f, y);
-            float rr = Math.min(1f, x + ww);
-            float bb = Math.min(1f, y + hh);
+            float l = Math.max(0f, flat[i * 4]);
+            float t = Math.max(0f, flat[i * 4 + 1]);
+            float rr = Math.min(1f, flat[i * 4] + flat[i * 4 + 2]);
+            float bb = Math.min(1f, flat[i * 4 + 1] + flat[i * 4 + 3]);
             if (rr <= l || bb <= t) continue;
             out[i] = new float[]{l, t, rr - l, bb - t};
         }
@@ -1672,11 +1723,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         final NegativeParams neg = negMode ? negativeParams.copy() : null;
         // 软件变焦部分（超过设备上限）在照片上也要按同样比例裁切
         final float extra = cameraController != null ? cameraController.extraZoom() : 1f;
-        // 预览是居中裁切填满屏幕的，成片也按同样的宽高比裁，做到所见即所得
-        final float viewAspect;
-        int vw = surfaceView == null ? 0 : surfaceView.getWidth();
-        int vh = surfaceView == null ? 0 : surfaceView.getHeight();
-        viewAspect = vw > 0 && vh > 0 ? vw / (float) vh : 0f;
         // 非正常风格且开启了“保存原素材”：先把相机原始 JPEG 原样存一份
         final boolean saveRaw = !negMode && saveOriginal && !st.normal;
         final float level = captureLevelDeg;
@@ -1695,11 +1741,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         worker.execute(() -> {
             byte[] prepared = jpeg;
-            if (viewAspect > 0.01f || extra > 1.001f) {
+            if (extra > 1.001f) {
                 try {
-                    prepared = GalleryProcessor.cropJpegForView(jpeg, viewAspect, extra);
+                    // 只裁掉软件变焦多出来的部分，取景框里的画面一律完整保留
+                    prepared = GalleryProcessor.cropJpegForView(jpeg, 0f, extra);
                 } catch (Throwable t) {
-                    Log.e(TAG, "crop jpeg to view", t);
+                    Log.e(TAG, "crop jpeg zoom", t);
                     prepared = jpeg;
                 }
             }
@@ -3679,6 +3726,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
         renderer.updatePreviewSize(width, height);
+        updatePreviewContentRect();
     }
 
     @Override
@@ -3731,6 +3779,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 cameraSurface = surface;
                 orientedW = frameWidth;
                 orientedH = frameHeight;
+                updatePreviewContentRect();
                 maybeStartCamera();
             });
         }
@@ -3753,6 +3802,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     updateFlashUi();
                     applyFlashState();
                     syncZoomUi();
+                    updatePreviewContentRect();
                     resolveWideLens();
                 });
             }
@@ -3878,11 +3928,20 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         // 录制时先收起构图提示，网格保留
         if (compOverlay != null) compOverlay.clearResult();
 
-        int recW = 720, recH = 1280;
-        if (orientedW > orientedH) {
+        // 录像画幅和取景框完全一致，不额外裁掉画面
+        float recAspect = previewImageAspect();
+        int recW, recH;
+        if (recAspect > 1f) {
             recW = 1280;
-            recH = 720;
+            recH = Math.round(recW / recAspect);
+        } else {
+            recH = 1280;
+            recW = Math.round(recH * recAspect);
         }
+        recW &= ~1;
+        recH &= ~1;
+        if (recW < 320) recW = 320;
+        if (recH < 320) recH = 320;
 
         try {
             pendingOutput = createOutput();

@@ -80,6 +80,8 @@ public class CartoonRenderer {
     private EGLSurface encoderSurface = EGL14.EGL_NO_SURFACE;
 
     private int previewW, previewH;
+    /** 预览画面在窗口中的显示区域（像素，左上角原点）；-1 表示铺满窗口。 */
+    private volatile int contentL = -1, contentT = -1, contentR = -1, contentB = -1;
     private int encoderW, encoderH;
     /** 录像编码器走“原始画面”通道：不加风格、不画小精灵，用于同时保存原素材。 */
     private boolean encoderPlain;
@@ -219,10 +221,10 @@ public class CartoonRenderer {
         }
     }
 
-    private Bitmap readPreviewPixels(int w, int h) {
+    private Bitmap readPreviewPixels(int rx, int ry, int w, int h) {
         try {
             ByteBuffer buf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder());
-            GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf);
+            GLES20.glReadPixels(rx, ry, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf);
             buf.position(0);
             Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
             int[] row = new int[w];
@@ -280,6 +282,14 @@ public class CartoonRenderer {
             previewW = width;
             previewH = height;
         });
+    }
+
+    /** 预览可见区域（相对窗口的像素坐标），四周空白会留黑边，画面不裁切。 */
+    public void setContentRect(int left, int top, int right, int bottom) {
+        contentL = left;
+        contentT = top;
+        contentR = right;
+        contentB = bottom;
     }
 
     /** 在 GL 线程创建相机用的 SurfaceTexture / Surface。 */
@@ -739,7 +749,22 @@ public class CartoonRenderer {
 
     private void blit(EGLSurface target, int vw, int vh, boolean forcePlain) {
         if (!makeCurrent(target)) return;
+        // 先铺满底色，再把画面按取景框比例放进去，四周留黑边而不是裁掉内容
         GLES20.glViewport(0, 0, vw, vh);
+        GLES20.glClearColor(0.03f, 0.03f, 0.05f, 1f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        int dx = 0, dy = 0, dw = vw, dh = vh;
+        if (target == previewSurface) {
+            int l = contentL, t = contentT, r = contentR, b = contentB;
+            if (l >= 0 && t >= 0 && r > l && b > t && r <= vw && b <= vh) {
+                dx = l;
+                dy = t;
+                dw = r - l;
+                dh = b - t;
+            }
+        }
+        if (dw < 2 || dh < 2) return;
+        GLES20.glViewport(dx, vh - (dy + dh), dw, dh);
         StylePreset st = style;
         boolean plain = forcePlain || st.normal;
         Program p = plain ? progPlain : progFinal;
@@ -755,7 +780,7 @@ public class CartoonRenderer {
             GLES20.glUniform1i(p.u("uBlur"), 1);
         }
 
-        float targetAspect = vw / (float) vh;
+        float targetAspect = dw / (float) dh;
         float sourceAspect = fboW / (float) fboH;
         float cx = 1f, cy = 1f;
         if (targetAspect < sourceAspect) {
@@ -818,12 +843,12 @@ public class CartoonRenderer {
         drawQuad(p);
 
         // 原素材通道不叠加小精灵；正常风格的预览/录像仍按开关显示小精灵
-        if (!forcePlain) drawSprites(vw, vh);
+        if (!forcePlain) drawSprites(dw, dh);
 
         if (target == previewSurface && pendingGrab != null) {
             final FrameGrab g = pendingGrab;
             pendingGrab = null;
-            final Bitmap shot = readPreviewPixels(vw, vh);
+            final Bitmap shot = readPreviewPixels(dx, vh - (dy + dh), dw, dh);
             mainHandler.post(() -> {
                 if (shot != null) g.cb.onFrame(shot);
                 else g.cb.onFailed();
@@ -889,11 +914,13 @@ public class CartoonRenderer {
             mainHandler.post(cb::onFailed);
             return;
         }
+        // 构图分析就按取景框里实际看到的画面来（含软件变焦裁切），
+        // 这样人脸框、对焦点和分析结果都在同一套坐标里
         int aw = 200;
-        int ah = Math.round(aw * (float) previewH / previewW);
+        int ah = Math.round(aw * (float) fboH / fboW);
         if (ah > 400) {
             ah = 400;
-            aw = Math.max(140, Math.round(ah * (float) previewW / previewH));
+            aw = Math.max(140, Math.round(ah * (float) fboW / fboH));
         }
         if (ah < 90) ah = 90;
         try {
@@ -918,10 +945,9 @@ public class CartoonRenderer {
             } else {
                 cy = sourceAspect / targetAspect;
             }
-            float ez = extraZoom;
-            if (ez > 1.001f) {
-                cx /= ez;
-                cy /= ez;
+            if (extraZoom > 1.001f) {
+                cx /= extraZoom;
+                cy /= extraZoom;
             }
             GLES20.glUniform2f(p.u("uCrop"), cx, cy);
             GLES20.glUniform1f(p.u("uMirror"), mirror ? 1f : 0f);

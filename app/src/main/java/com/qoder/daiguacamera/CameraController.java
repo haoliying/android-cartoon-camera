@@ -58,6 +58,8 @@ public class CameraController {
     private ImageReader stillReader;
     private Surface stillSurface;
     private int stillRotation = 90;
+    /** 当前会话使用的 JPEG 尺寸（原始传感器方向），取景框按它来算画幅。 */
+    private volatile Size stillSize;
     private volatile Consumer<byte[]> jpegSink;
     private Runnable jpegTimeout;
     private boolean stillRetried;
@@ -233,15 +235,15 @@ public class CameraController {
             Size[] sizes = map.getOutputSizes(SurfaceTexture.class);
             if (sizes == null || sizes.length == 0) return new Size(1280, 720);
 
-            // 首选接近 720p 的 16:9 尺寸
+            // 首选接近 1440x1080 的 4:3 尺寸：和照片画幅一致，取景框才能看到完整的相机视野
             Size best = null;
             long bestScore = Long.MAX_VALUE;
             for (Size s : sizes) {
                 int longSide = Math.max(s.getWidth(), s.getHeight());
                 int shortSide = Math.min(s.getWidth(), s.getHeight());
-                if (longSide > 1920) continue;
-                if (Math.abs(shortSide * 16 - longSide * 9) > longSide * 9 / 20) continue;
-                long score = Math.abs(longSide - 1280) * 10L + Math.abs(shortSide - 720);
+                if (longSide > 1920 || shortSide <= 0) continue;
+                if (Math.abs(longSide / (double) shortSide - 4.0 / 3.0) > 0.03) continue;
+                long score = Math.abs(longSide - 1440) * 10L + Math.abs(shortSide - 1080);
                 if (score < bestScore) {
                     bestScore = score;
                     best = s;
@@ -249,22 +251,33 @@ public class CameraController {
             }
             if (best != null) return best;
 
-            // 兜底：面积最接近 720p 的尺寸
-            long target = 1280L * 720L;
+            // 兜底：最接近 4:3 且面积接近 1440x1080 的尺寸
+            long target = 1440L * 1080L;
+            double bestAspect = Double.MAX_VALUE;
             long bestDiff = Long.MAX_VALUE;
             for (Size s : sizes) {
-                if (s.getWidth() > 1920 || s.getHeight() > 1920) continue;
-                long diff = Math.abs((long) s.getWidth() * s.getHeight() - target);
-                if (diff < bestDiff) {
+                int longSide = Math.max(s.getWidth(), s.getHeight());
+                int shortSide = Math.min(s.getWidth(), s.getHeight());
+                if (longSide > 1920 || shortSide <= 0) continue;
+                double aspect = Math.abs(longSide / (double) shortSide - 4.0 / 3.0);
+                long diff = Math.abs((long) longSide * shortSide - target);
+                if (aspect < bestAspect - 0.001
+                        || (Math.abs(aspect - bestAspect) <= 0.001 && diff < bestDiff)) {
+                    bestAspect = aspect;
                     bestDiff = diff;
                     best = s;
                 }
             }
-            return best != null ? best : new Size(1280, 720);
+            return best != null ? best : new Size(1280, 960);
         } catch (CameraAccessException e) {
             Log.e(TAG, "pickPreviewSize", e);
             return new Size(1280, 720);
         }
+    }
+
+    /** 当前会话拍照使用的 JPEG 尺寸；还没开始时返回 null。 */
+    public Size stillSize() {
+        return stillSize;
     }
 
     /** 挑一个“够用又不撑爆内存”的 JPEG 尺寸：偏好 4:3、长边 2000 左右。 */
@@ -648,12 +661,14 @@ public class CameraController {
         }
         try {
             Size size = pickStillSize(facing, activeCameraId);
+            stillSize = size;
             stillReader = ImageReader.newInstance(size.getWidth(), size.getHeight(),
                     ImageFormat.JPEG, 2);
             stillReader.setOnImageAvailableListener(this::onJpegReady, handler);
             stillSurface = stillReader.getSurface();
         } catch (Throwable t) {
             Log.w(TAG, "no still capture", t);
+            stillSize = null;
             stillReader = null;
             stillSurface = null;
         }
