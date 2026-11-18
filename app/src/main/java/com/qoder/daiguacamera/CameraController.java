@@ -107,6 +107,13 @@ public class CameraController {
     private volatile int currentSceneMode = CaptureRequest.CONTROL_SCENE_MODE_DISABLED;
     /** 构图助手开启时打开人脸检测；关掉后不再请求统计信息。 */
     private volatile boolean faceDetectOn = false;
+    /** 全自动参数：预览起步和参数被机型拒绝时的兜底，保证一定出画面。 */
+    private static final CaptureParams SAFE_PARAMS = new CaptureParams();
+    private volatile Listener currentListener;
+    /** 本次会话是否已经收到过画面。 */
+    private volatile boolean framesSeen;
+    private int previewRetries;
+    private final Runnable previewWatchdog = this::onPreviewWatchdog;
     private volatile int faceDetectMode = android.hardware.camera2.CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF;
     /** 人脸框（显示方向的归一化 x,y,w,h），按面积从大到小。 */
     private volatile float[] faceRects = new float[0];
@@ -605,6 +612,8 @@ public class CameraController {
     /** idOverride 为 null 时按 facing 自动选；传广角 ID 可以打开后置超广角镜头。 */
     public void open(int facing, String idOverride, Surface surface, Listener listener) {
         final int gen = ++generation;
+        currentListener = listener;
+        previewRetries = 0;
         handler.post(() -> {
             closeInternal();
             try {
@@ -679,7 +688,9 @@ public class CameraController {
         try {
             CaptureRequest.Builder builder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             builder.addTarget(surface);
-            applyParams(builder, false);
+            // 先用全自动参数起预览：部分机型不接受第一帧就带手动参数，会直接没有画面。
+            // 收到第一帧后再换成用户/场景参数（见 previewCb）。
+            applyParams(builder, false, true);
             List<Surface> outputs = new ArrayList<>();
             outputs.add(surface);
             if (stillSurface != null) outputs.add(stillSurface);
@@ -692,12 +703,18 @@ public class CameraController {
                                 return;
                             }
                             session = s;
+                            framesSeen = false;
                             try {
                                 s.setRepeatingRequest(builder.build(), previewCb, handler);
-                                mainHandler.post(listener::onOpened);
                             } catch (Throwable t) {
-                                postError(listener, "预览启动失败：" + t.getMessage());
+                                Log.w(TAG, "start preview rejected, retry auto", t);
+                                if (!startSafeRepeating(s)) {
+                                    postError(listener, "预览启动失败：" + t.getMessage());
+                                    return;
+                                }
                             }
+                            scheduleWatchdog();
+                            mainHandler.post(listener::onOpened);
                         }
 
                         @Override
@@ -881,7 +898,55 @@ public class CameraController {
             applyParams(b, false);
             session.setRepeatingRequest(b.build(), previewCb, handler);
         } catch (Throwable t) {
-            Log.w(TAG, "applyRepeating", t);
+            // 参数被机型拒绝时退回全自动，否则预览会一直黑屏
+            Log.w(TAG, "applyRepeating rejected, fallback auto", t);
+            startSafeRepeating(session);
+        }
+    }
+
+    /** 用全自动参数重新起预览；失败返回 false。 */
+    private boolean startSafeRepeating(CameraCaptureSession s) {
+        if (s == null || device == null || previewSurface == null) return false;
+        try {
+            CaptureRequest.Builder b = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            b.addTarget(previewSurface);
+            applyParams(b, false, true);
+            s.setRepeatingRequest(b.build(), previewCb, handler);
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "startSafeRepeating failed", t);
+            return false;
+        }
+    }
+
+    private void scheduleWatchdog() {
+        handler.removeCallbacks(previewWatchdog);
+        handler.postDelayed(previewWatchdog, 3500);
+    }
+
+    /**
+     * 预览看门狗：会话建好但一直没画面时，先退回全自动请求，再不行就重建会话。
+     * 这样即使某组场景参数不被机型接受，也不会停在黑屏上。
+     */
+    private void onPreviewWatchdog() {
+        if (framesSeen || session == null || device == null || previewSurface == null) return;
+        if (previewRetries == 0) {
+            previewRetries = 1;
+            Log.w(TAG, "no preview frame, retry with auto params");
+            if (startSafeRepeating(session)) {
+                scheduleWatchdog();
+                return;
+            }
+        }
+        if (previewRetries == 1) {
+            previewRetries = 2;
+            Log.w(TAG, "still no preview frame, rebuild session");
+            try {
+                session.close();
+            } catch (Throwable ignored) {
+            }
+            session = null;
+            createSession(previewSurface, generation, currentListener);
         }
     }
 
@@ -892,6 +957,13 @@ public class CameraController {
                 public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest request,
                                                TotalCaptureResult result) {
                     if (result == null) return;
+                    // 第一帧已经把自动预览跑起来，这时再换成用户/场景参数
+                    if (!framesSeen) {
+                        framesSeen = true;
+                        previewRetries = 0;
+                        handler.removeCallbacks(previewWatchdog);
+                        handler.post(CameraController.this::applyRepeating);
+                    }
                     try {
                         Integer iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
                         Long exp = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
@@ -1005,7 +1077,12 @@ public class CameraController {
     }
 
     private void applyParams(CaptureRequest.Builder b, boolean forStill) {
-        CaptureParams p = params;
+        applyParams(b, forStill, false);
+    }
+
+    /** safe 为 true 时一律用全自动参数（预览起步、参数被拒绝时兜底）。 */
+    private void applyParams(CaptureRequest.Builder b, boolean forStill, boolean safe) {
+        CaptureParams p = safe ? SAFE_PARAMS : params;
         // 自动场景：按亮度与动静让相机切换场景模式（夜景 / 运动 / 普通）
         try {
             int mode = p.autoScene ? pickSceneMode()
@@ -1020,42 +1097,62 @@ public class CameraController {
             }
         }
         // 曝光（拍照时按闪光灯策略选择 AE 闪光模式）
-        try {
+        // 每个键单独兜底：只要不把 AE_ON 和手动 ISO/曝光时间混在一起，机型就不会整条请求拒收。
+        if (p.manualExposure) {
+            try {
+                b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+            } catch (Throwable ignored) {
+            }
+            long exp = clampExposure(p.exposureNs, forStill);
+            try {
+                b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exp);
+            } catch (Throwable ignored) {
+            }
+            try {
+                b.set(CaptureRequest.SENSOR_SENSITIVITY, clampIso(p.iso));
+            } catch (Throwable ignored) {
+            }
+            if (!forStill) {
+                // 手动曝光时补一帧时长，部分机型缺了它预览会卡住不出画面
+                try {
+                    b.set(CaptureRequest.SENSOR_FRAME_DURATION, Math.max(exp, 33_333_333L));
+                } catch (Throwable ignored) {
+                }
+            }
+        } else {
             boolean stillFlash = forStill && flashAvailable;
             int aeMode = CaptureRequest.CONTROL_AE_MODE_ON;
-            if (p.manualExposure) {
-                aeMode = CaptureRequest.CONTROL_AE_MODE_OFF;
-            } else if (stillFlash && flashMode == FLASH_ON) {
+            if (stillFlash && flashMode == FLASH_ON) {
                 aeMode = CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH;
             } else if (stillFlash && flashMode == FLASH_AUTO) {
                 aeMode = CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH;
             }
-            b.set(CaptureRequest.CONTROL_AE_MODE, aeMode);
-            if (p.manualExposure) {
-                b.set(CaptureRequest.SENSOR_SENSITIVITY, clampIso(p.iso));
-                b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, clampExposure(p.exposureNs, forStill));
-            } else {
-                b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, clampEv(p.ev));
-            }
-        } catch (Throwable t) {
             try {
-                b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
-            } catch (Throwable ignored) {
+                b.set(CaptureRequest.CONTROL_AE_MODE, aeMode);
+                b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, clampEv(p.ev));
+            } catch (Throwable t) {
+                try {
+                    b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+                } catch (Throwable ignored) {
+                }
             }
         }
         // 白平衡
-        try {
-            if (p.wbAuto) {
+        if (p.wbAuto) {
+            try {
                 b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO);
-            } else {
+            } catch (Throwable ignored) {
+            }
+        } else {
+            // 同样是逐个设置：AWB 关闭后没设上增益也只是偏色，不会让请求被拒
+            try {
                 b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF);
+            } catch (Throwable ignored) {
+            }
+            try {
                 b.set(CaptureRequest.COLOR_CORRECTION_MODE,
                         CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX);
                 b.set(CaptureRequest.COLOR_CORRECTION_GAINS, gainsForKelvin(p.kelvin));
-            }
-        } catch (Throwable t) {
-            try {
-                b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO);
             } catch (Throwable ignored) {
             }
         }
@@ -1248,6 +1345,9 @@ public class CameraController {
 
     private void closeInternal() {
         jpegSink = null;
+        framesSeen = false;
+        previewRetries = 0;
+        handler.removeCallbacks(previewWatchdog);
         if (stillReader != null) {
             try {
                 stillReader.close();

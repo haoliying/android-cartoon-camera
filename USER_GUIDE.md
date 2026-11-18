@@ -1,6 +1,6 @@
 # 呆瓜相机 · 操作手册
 
-适用版本：**v1.25**（versionCode 26）  
+适用版本：**v1.26**（versionCode 27）  
 系统要求：Android 7.0 及以上  
 包名：`com.qoder.daiguacamera`
 
@@ -8,7 +8,7 @@
 
 ## 1. 安装与首次启动
 
-1. 安装 `daigua-camera-v1.25.apk`。如果手机提示“未知来源”，允许当前文件管理器安装即可。
+1. 安装 `daigua-camera-v1.26.apk`。如果手机提示“未知来源”，允许当前文件管理器安装即可。
 2. 首次打开会申请 **相机** 和 **麦克风** 权限：
    - 相机：必需，否则无法预览和拍摄。
    - 麦克风：录像收音用；拒绝也能录像，但视频没有声音。
@@ -360,7 +360,7 @@ Android 9 及以下需要存储权限；同时确认手机剩余空间充足。
 
 ## 12. 版本与反馈
 
-- 当前版本：v1.25（versionCode 26）
+- 当前版本：v1.26（versionCode 27）
 - 内置文档：点顶部「说明」，可离线查看 **操作手册** 和 **更新说明**，内容随 APK 一起安装
 - 历史更新：[CHANGELOG.md](CHANGELOG.md)
 - 项目与下载：<https://github.com/haoliying/daigua-camera>
