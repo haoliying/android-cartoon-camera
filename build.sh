@@ -21,7 +21,7 @@ echo "[2/7] 链接资源与清单"
   --java "$OUT/gen" \
   -A "$ROOT/app/src/main/assets" \
   --min-sdk-version 24 --target-sdk-version 34 \
-  --version-code 23 --version-name 1.22 \
+  --version-code 24 --version-name 1.23 \
   "$OUT/res.zip"
 
 echo "[3/7] 编译 Java"

@@ -1672,6 +1672,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         final NegativeParams neg = negMode ? negativeParams.copy() : null;
         // 软件变焦部分（超过设备上限）在照片上也要按同样比例裁切
         final float extra = cameraController != null ? cameraController.extraZoom() : 1f;
+        // 预览是居中裁切填满屏幕的，成片也按同样的宽高比裁，做到所见即所得
+        final float viewAspect;
+        int vw = surfaceView == null ? 0 : surfaceView.getWidth();
+        int vh = surfaceView == null ? 0 : surfaceView.getHeight();
+        viewAspect = vw > 0 && vh > 0 ? vw / (float) vh : 0f;
         // 非正常风格且开启了“保存原素材”：先把相机原始 JPEG 原样存一份
         final boolean saveRaw = !negMode && saveOriginal && !st.normal;
         final float level = captureLevelDeg;
@@ -1690,18 +1695,19 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         worker.execute(() -> {
             byte[] prepared = jpeg;
-            if (extra > 1.001f) {
+            if (viewAspect > 0.01f || extra > 1.001f) {
                 try {
-                    prepared = GalleryProcessor.cropJpegCenter(jpeg, 1f / extra);
+                    prepared = GalleryProcessor.cropJpegForView(jpeg, viewAspect, extra);
                 } catch (Throwable t) {
-                    Log.e(TAG, "crop zoom jpeg", t);
+                    Log.e(TAG, "crop jpeg to view", t);
                     prepared = jpeg;
                 }
             }
             final byte[] shot = prepared;
             if (saveRaw) {
                 try {
-                    GalleryProcessor.saveOriginalJpeg(this, shot);
+                    // “原素材”保留相机原始的完整视野，不受所见即所得裁切影响
+                    GalleryProcessor.saveOriginalJpeg(this, jpeg);
                 } catch (Throwable t) {
                     Log.e(TAG, "save original jpeg", t);
                 }
@@ -3120,7 +3126,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         adjustInfo = new TextView(this);
         adjustInfo.setText((adjustIsVideo ? "视频" : "照片") + " · " + name
-                + (adjustIsVideo ? "\n视频保存时会重新编码，耗时较长" : ""));
+                + (adjustIsVideo ? "\n视频保存时会重新编码，耗时较长" : "")
+                + "\n点图片可全屏查看完整画面");
         adjustInfo.setTextColor(0xFF9AA0B2);
         adjustInfo.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         content.addView(adjustInfo, new LinearLayout.LayoutParams(MATCH, WRAP));
@@ -3134,6 +3141,17 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         LinearLayout.LayoutParams pvLp = new LinearLayout.LayoutParams(MATCH, dp(190));
         pvLp.topMargin = dp(6);
         content.addView(adjustPreviewView, pvLp);
+        adjustPreviewView.setOnClickListener(v -> {
+            Bitmap cur = adjustPreviewShown != null ? adjustPreviewShown : adjustPreviewBase;
+            if (cur == null || cur.isRecycled()) return;
+            Bitmap copy;
+            try {
+                copy = cur.copy(Bitmap.Config.ARGB_8888, false);
+            } catch (Throwable t) {
+                copy = null;
+            }
+            if (copy != null) showFullImage("调色预览", copy, true);
+        });
 
         // 预设模式：内置 + 用户保存的
         android.widget.HorizontalScrollView chipScroll =
@@ -3536,18 +3554,47 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void showPreview(String message, Bitmap bmp) {
+        showFullImage(message, bmp, true);
+    }
+
+    /** 全屏看图：完整显示整张图片（FIT_CENTER），点按关闭。own=true 时接管并回收图片。 */
+    private void showFullImage(String message, Bitmap bmp, boolean own) {
+        if (bmp == null || bmp.isRecycled() || isFinishing() || isDestroyed()) {
+            if (own && bmp != null && !bmp.isRecycled()) bmp.recycle();
+            return;
+        }
         ImageView iv = new ImageView(this);
-        iv.setAdjustViewBounds(true);
         iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
         iv.setImageBitmap(bmp);
-        iv.setPadding(dp(8), dp(8), dp(8), dp(8));
-        new AlertDialog.Builder(this)
-                .setTitle("完成")
-                .setMessage(message)
-                .setView(iv)
-                .setPositiveButton("好", (d, w) -> iv.setImageDrawable(null))
-                .setOnDismissListener(d -> iv.setImageDrawable(null))
-                .show();
+        FrameLayout box = new FrameLayout(this);
+        box.setBackgroundColor(0xFF000000);
+        box.addView(iv, new FrameLayout.LayoutParams(MATCH, MATCH));
+
+        TextView tip = new TextView(this);
+        tip.setText((message == null || message.isEmpty() ? "" : message + "\n") + "点按关闭");
+        tip.setTextColor(0xCCFFFFFF);
+        tip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        tip.setGravity(Gravity.CENTER);
+        tip.setPadding(dp(16), dp(12), dp(16), dp(12));
+        tip.setBackgroundColor(0x99000000);
+        tip.setClickable(false);
+        FrameLayout.LayoutParams tipLp = new FrameLayout.LayoutParams(MATCH, WRAP);
+        tipLp.gravity = Gravity.BOTTOM;
+        box.addView(tip, tipLp);
+
+        Dialog d = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+        d.setContentView(box);
+        Window win = d.getWindow();
+        if (win != null) {
+            win.setBackgroundDrawable(new ColorDrawable(0xFF000000));
+            win.setLayout(MATCH, MATCH);
+        }
+        box.setOnClickListener(v -> d.dismiss());
+        d.setOnDismissListener(x -> {
+            iv.setImageDrawable(null);
+            if (own && !bmp.isRecycled()) bmp.recycle();
+        });
+        d.show();
     }
 
     // ------------------------------------------------------------------ permissions

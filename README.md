@@ -4,7 +4,7 @@ Android 实时卡通相机：Camera2 + OpenGL ES 预览/录像实时滤镜，支
 
 - 包名：`com.qoder.daiguacamera`
 - 最低系统：Android 7.0（API 24）
-- 当前版本：v1.22（versionCode 23）
+- 当前版本：v1.23（versionCode 24）
 
 ## 下载
 

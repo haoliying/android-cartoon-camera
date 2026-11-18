@@ -907,10 +907,16 @@ public class GalleryProcessor {
         return saveBitmap(ctx, bmp);
     }
 
-    /** 软件变焦：先按 EXIF 摆正，再把 JPEG 居中裁掉一部分，返回新的 JPEG 字节。 */
-    public static byte[] cropJpegCenter(byte[] jpeg, float keep) throws Exception {
-        if (jpeg == null || keep >= 0.999f) return jpeg;
-        float k = Math.max(0.02f, Math.min(1f, keep));
+    /**
+     * 所见即所得：先按 EXIF 摆正，再按预览画面的宽高比居中裁切，
+     * 并把软件变焦（extra）也按同样比例裁掉，返回新的 JPEG 字节。
+     */
+    public static byte[] cropJpegForView(byte[] jpeg, float targetAspect, float extra)
+            throws Exception {
+        if (jpeg == null) return jpeg;
+        float aspect = targetAspect > 0.01f ? targetAspect : 0f;
+        float keep = extra > 1.001f ? 1f / extra : 1f;
+        if (aspect <= 0f && keep >= 0.999f) return jpeg;
         Bitmap src = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
         if (src == null) return jpeg;
         Bitmap upright = src;
@@ -923,11 +929,24 @@ public class GalleryProcessor {
             } catch (Throwable ignored) {
             }
             upright = applyOrientation(src, orientation);
-            int w = Math.max(1, Math.round(upright.getWidth() * k));
-            int h = Math.max(1, Math.round(upright.getHeight() * k));
-            int x = Math.max(0, (upright.getWidth() - w) / 2);
-            int y = Math.max(0, (upright.getHeight() - h) / 2);
-            Bitmap out = Bitmap.createBitmap(upright, x, y, w, h);
+            int sw = Math.max(1, upright.getWidth());
+            int sh = Math.max(1, upright.getHeight());
+            float cur = sw / (float) sh;
+            int cw = sw;
+            int ch = sh;
+            if (aspect > 0f) {
+                if (cur > aspect * 1.004f) {
+                    cw = Math.max(1, Math.round(sh * aspect));
+                } else if (cur < aspect * 0.996f) {
+                    ch = Math.max(1, Math.round(sw / aspect));
+                }
+            }
+            cw = Math.max(1, Math.round(cw * keep));
+            ch = Math.max(1, Math.round(ch * keep));
+            if (cw >= sw - 1 && ch >= sh - 1) return jpeg;
+            int x = Math.max(0, (sw - cw) / 2);
+            int y = Math.max(0, (sh - ch) / 2);
+            Bitmap out = Bitmap.createBitmap(upright, x, y, cw, ch);
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             out.compress(Bitmap.CompressFormat.JPEG, 95, bos);
             if (out != upright) out.recycle();
