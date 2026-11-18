@@ -114,6 +114,10 @@ public class ScenePreset {
     public static final ScenePreset[] ALL = {
             special("daily", "日常", "普通拍摄：全自动，拿起就拍", false),
             special("auto_scene", "自动场景", "自动识别光线和动静，匹配最合适的参数", true),
+            // 一天里的光线：清晨柔和、中午反差大、傍晚偏暖
+            new ScenePreset("morning", "清晨", "晨光柔和平淡，稍加曝光更透亮", true, 100, ns(1 / 160.0), 0.3f, 5600, false, CaptureParams.FOCUS_INFINITY, 0f),
+            new ScenePreset("noon", "中午", "顶光硬、反差大，压低曝光保高光", true, 100, ns(1 / 1000.0), -0.3f, 5800, false, CaptureParams.FOCUS_INFINITY, 0f),
+            new ScenePreset("evening", "傍晚", "金色光最暖，慢一点快门收住氛围", true, 200, ns(1 / 60.0), 0.3f, 4500, false, CaptureParams.FOCUS_AUTO, 0f),
             // 光比大、需要压高光的风光
             new ScenePreset("sunrise", "日出", "低 ISO 压住太阳，暖白平衡", true, 100, ns(1 / 250.0), 0.3f, 4200, false, CaptureParams.FOCUS_INFINITY, 0f),
             new ScenePreset("sunset", "日落", "保留天空层次，稍欠曝", true, 100, ns(1 / 200.0), 0.5f, 4800, false, CaptureParams.FOCUS_INFINITY, 0f),
