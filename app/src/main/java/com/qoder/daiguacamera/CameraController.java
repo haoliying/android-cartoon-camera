@@ -105,6 +105,10 @@ public class CameraController {
     private volatile int lastIso;
     private volatile long lastExposureNs;
     private volatile int currentSceneMode = CaptureRequest.CONTROL_SCENE_MODE_DISABLED;
+    /** 相机硬件支持等级：LEGACY 机型不接受手动 ISO/快门，只能走自动曝光 + EV。 */
+    private volatile int hwLevel = CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY;
+    /** 是否支持关闭自动白平衡（手动色温增益）。华为部分机型不支持，硬关会偏色。 */
+    private volatile boolean awbOffSupported = false;
     /** 构图助手开启时打开人脸检测；关掉后不再请求统计信息。 */
     private volatile boolean faceDetectOn = false;
     /** 全自动参数：预览起步和参数被机型拒绝时的兜底，保证一定出画面。 */
@@ -329,7 +333,8 @@ public class CameraController {
 
     /** 手动参数只在支持 MANUAL_SENSOR 的设备（LIMITED / FULL）上生效。 */
     public boolean supportsManual() {
-        return isoRange != null && expRange != null;
+        return isoRange != null && expRange != null
+                && hwLevel != CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY;
     }
 
     public void setParams(CaptureParams p) {
@@ -517,6 +522,8 @@ public class CameraController {
         sceneAction = false;
         lastIso = 0;
         lastExposureNs = 0;
+        hwLevel = CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY;
+        awbOffSupported = false;
         faceDetectMode = android.hardware.camera2.CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF;
         faceRects = new float[0];
         cameraFacing = facing;
@@ -527,6 +534,15 @@ public class CameraController {
             isoRange = c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
             expRange = c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
             evRange = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
+            Integer level = c.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL);
+            hwLevel = level == null
+                    ? CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY : level;
+            int[] awbModes = c.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES);
+            if (awbModes != null) {
+                for (int m : awbModes) {
+                    if (m == CaptureRequest.CONTROL_AWB_MODE_OFF) awbOffSupported = true;
+                }
+            }
             Boolean flash = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
             flashAvailable = flash != null && flash;
             flashKnown = true;
@@ -1098,7 +1114,10 @@ public class CameraController {
         }
         // 曝光（拍照时按闪光灯策略选择 AE 闪光模式）
         // 每个键单独兜底：只要不把 AE_ON 和手动 ISO/曝光时间混在一起，机型就不会整条请求拒收。
-        if (p.manualExposure) {
+        // 机型不支持手动曝光（LEGACY，常见于部分华为/荣耀低端机）时，
+        // 自动降级成“自动曝光 + 场景的 EV 补偿”，避免参数被拒或画面全黑。
+        boolean manual = p.manualExposure && supportsManual();
+        if (manual) {
             try {
                 b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
             } catch (Throwable ignored) {
@@ -1137,23 +1156,29 @@ public class CameraController {
                 }
             }
         }
-        // 白平衡
-        if (p.wbAuto) {
+        // 白平衡：机型不支持手动色温（华为部分机型）时老老实实用自动，避免偏色
+        if (p.wbAuto || !awbOffSupported || safe) {
             try {
                 b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO);
             } catch (Throwable ignored) {
             }
         } else {
-            // 同样是逐个设置：AWB 关闭后没设上增益也只是偏色，不会让请求被拒
             try {
                 b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF);
-            } catch (Throwable ignored) {
-            }
-            try {
                 b.set(CaptureRequest.COLOR_CORRECTION_MODE,
                         CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX);
                 b.set(CaptureRequest.COLOR_CORRECTION_GAINS, gainsForKelvin(p.kelvin));
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
+                // 增益不被接受就退回自动白平衡，别停在“手动色温但没有增益”的偏色状态
+                try {
+                    b.set(CaptureRequest.COLOR_CORRECTION_MODE,
+                            CaptureRequest.COLOR_CORRECTION_MODE_FAST);
+                } catch (Throwable ignored) {
+                }
+                try {
+                    b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO);
+                } catch (Throwable ignored) {
+                }
             }
         }
         // 对焦
